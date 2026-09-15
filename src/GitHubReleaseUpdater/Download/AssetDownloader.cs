@@ -101,10 +101,16 @@ public sealed class AssetDownloader
         progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed));
     }
 
+    // Fixed cross-platform set (not Path.GetInvalidFileNameChars(), which varies by OS and
+    // would leave e.g. ':' and '?' unsanitized when running on Linux CI).
+    private static readonly char[] InvalidFileNameChars =
+        "\"<>|:*?/\\".ToCharArray()
+            .Concat(Enumerable.Range(0, 32).Select(i => (char)i))
+            .ToArray();
+
     private static string SanitizeFileName(string name)
     {
-        var invalid = Path.GetInvalidFileNameChars();
-        var cleaned = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        var cleaned = new string(name.Select(c => InvalidFileNameChars.Contains(c) ? '_' : c).ToArray()).Trim();
         if (cleaned.Length == 0 || cleaned is "." or "..")
             throw new ArgumentException($"Invalid asset file name '{name}'.", nameof(name));
         return cleaned;
