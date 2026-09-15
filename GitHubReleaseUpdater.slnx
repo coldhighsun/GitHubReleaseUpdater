@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/GitHubReleaseUpdater.Cli/GitHubReleaseUpdater.Cli.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/GitHubReleaseUpdater/GitHubReleaseUpdater.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/GitHubReleaseUpdater.Tests/GitHubReleaseUpdater.Tests.csproj" />
+  </Folder>
+</Solution>

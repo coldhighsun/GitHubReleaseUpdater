@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>GitHubReleaseUpdater</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
+
+    <PackageId>GitHubReleaseUpdater</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>gaoyang.han</Authors>
+    <Description>Check, download and verify application updates published as GitHub Releases (github.com and GitHub Enterprise).</Description>
+    <PackageTags>github;release;update;updater;auto-update;semver</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="GitHubReleaseUpdater.Tests" />
+  </ItemGroup>
+
+</Project>

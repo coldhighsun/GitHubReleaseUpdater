@@ -1,0 +1,38 @@
+{
+  "id": 100,
+  "tag_name": "v2.1.0",
+  "name": "2.1.0",
+  "body": "## Changes\n- Fixed things",
+  "draft": false,
+  "prerelease": false,
+  "html_url": "https://github.com/o/r/releases/tag/v2.1.0",
+  "published_at": "2026-09-01T10:00:00Z",
+  "created_at": "2026-09-01T09:00:00Z",
+  "assets": [
+    {
+      "id": 1,
+      "name": "myapp-2.1.0-win-x64.zip",
+      "content_type": "application/zip",
+      "size": 1234,
+      "browser_download_url": "https://github.com/o/r/releases/download/v2.1.0/myapp-2.1.0-win-x64.zip",
+      "url": "https://api.github.com/repos/o/r/releases/assets/1",
+      "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    },
+    {
+      "id": 2,
+      "name": "myapp-2.1.0-linux-amd64.tar.gz",
+      "content_type": "application/gzip",
+      "size": 2345,
+      "browser_download_url": "https://github.com/o/r/releases/download/v2.1.0/myapp-2.1.0-linux-amd64.tar.gz",
+      "url": "https://api.github.com/repos/o/r/releases/assets/2"
+    },
+    {
+      "id": 3,
+      "name": "SHA256SUMS",
+      "content_type": "text/plain",
+      "size": 200,
+      "browser_download_url": "https://github.com/o/r/releases/download/v2.1.0/SHA256SUMS",
+      "url": "https://api.github.com/repos/o/r/releases/assets/3"
+    }
+  ]
+}

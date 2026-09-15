@@ -1,0 +1,119 @@
+using System.Text.RegularExpressions;
+using GitHubReleaseUpdater.GitHub.Models;
+
+namespace GitHubReleaseUpdater.Assets;
+
+/// <summary>
+/// Picks the asset whose file name best matches the current (or given) OS and architecture,
+/// tolerating common naming conventions such as <c>app-win-x64.zip</c>, <c>app_linux_amd64.tar.gz</c>, <c>app-darwin-arm64.dmg</c>.
+/// Checksum/signature files are never selected.
+/// </summary>
+public sealed partial class RuntimeAssetSelector : IAssetSelector
+{
+    private readonly RuntimeInfo _runtime;
+    private readonly IReadOnlyCollection<string> _preferredExtensions;
+
+    /// <summary>Creates a selector for the current runtime.</summary>
+    public RuntimeAssetSelector() : this(RuntimeInfo.Current) { }
+
+    /// <summary>Creates a selector for a specific runtime.</summary>
+    /// <param name="runtime">Target OS/arch.</param>
+    /// <param name="preferredExtensions">Optional extensions (e.g. <c>.zip</c>, <c>.msi</c>) that break ties; earlier entries win.</param>
+    public RuntimeAssetSelector(RuntimeInfo runtime, params string[] preferredExtensions)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        _runtime = runtime;
+        _preferredExtensions = preferredExtensions.Select(e => e.StartsWith('.') ? e : "." + e).ToArray();
+    }
+
+    /// <inheritdoc />
+    public GitHubAsset? Select(GitHubRelease release)
+    {
+        ArgumentNullException.ThrowIfNull(release);
+        var osTokens = RuntimeInfo.OsAliases.TryGetValue(_runtime.Os, out var o) ? o : [_runtime.Os];
+        var archTokens = RuntimeInfo.ArchAliases.TryGetValue(_runtime.Arch, out var a) ? a : [_runtime.Arch];
+
+        GitHubAsset? best = null;
+        var bestScore = 0;
+        foreach (var asset in release.Assets)
+        {
+            if (IsMetadataFile(asset.Name)) continue;
+            var score = Score(asset.Name, osTokens, archTokens);
+            if (score > bestScore)
+            {
+                best = asset;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private int Score(string name, string[] osTokens, string[] archTokens)
+    {
+        var tokens = TokenizeName(name);
+        var osHit = tokens.Any(t => osTokens.Contains(t, StringComparer.OrdinalIgnoreCase));
+        var archHit = tokens.Any(t => archTokens.Contains(t, StringComparer.OrdinalIgnoreCase));
+
+        // Reject files that explicitly name a *different* OS or arch.
+        var otherOs = RuntimeInfo.OsAliases.Where(kv => !kv.Key.Equals(_runtime.Os, StringComparison.OrdinalIgnoreCase))
+                                            .SelectMany(kv => kv.Value);
+        var otherArch = RuntimeInfo.ArchAliases.Where(kv => !kv.Key.Equals(_runtime.Arch, StringComparison.OrdinalIgnoreCase))
+                                                .SelectMany(kv => kv.Value);
+        if (!osHit && tokens.Any(t => otherOs.Contains(t, StringComparer.OrdinalIgnoreCase))) return 0;
+        if (!archHit && tokens.Any(t => otherArch.Contains(t, StringComparer.OrdinalIgnoreCase))) return 0;
+
+        var score = 0;
+        if (osHit) score += 100;
+        if (archHit) score += 50;
+        if (!osHit && !archHit) return 0;
+
+        // Extension preference (earlier = better).
+        var lower = name.ToLowerInvariant();
+        var idx = 0;
+        foreach (var ext in _preferredExtensions)
+        {
+            if (lower.EndsWith(ext, StringComparison.Ordinal))
+            {
+                score += 20 - Math.Min(idx, 19);
+                break;
+            }
+            idx++;
+        }
+
+        // Windows heuristics: prefer installers/archives over bare exe when nothing else distinguishes them.
+        if (_runtime.Os == "win" && (lower.EndsWith(".msi", StringComparison.Ordinal) || lower.EndsWith(".zip", StringComparison.Ordinal))) score += 1;
+        return score;
+    }
+
+    private static string[] TokenizeName(string name)
+    {
+        // Collapse compound aliases that contain separators so they survive tokenization.
+        var normalized = name.ToLowerInvariant()
+            .Replace("x86_64", "x64", StringComparison.Ordinal)
+            .Replace("x86-64", "x64", StringComparison.Ordinal)
+            .Replace("64-bit", "64bit", StringComparison.Ordinal)
+            .Replace("32-bit", "32bit", StringComparison.Ordinal);
+        return TokenSplit().Split(normalized).Where(t => t.Length > 0).ToArray();
+    }
+
+    /// <summary>True for checksum, signature and similar sidecar files.</summary>
+    public static bool IsMetadataFile(string name)
+    {
+        var lower = name.ToLowerInvariant();
+        return lower.EndsWith(".sha256", StringComparison.Ordinal)
+            || lower.EndsWith(".sha512", StringComparison.Ordinal)
+            || lower.EndsWith(".sha1", StringComparison.Ordinal)
+            || lower.EndsWith(".md5", StringComparison.Ordinal)
+            || lower.EndsWith(".sig", StringComparison.Ordinal)
+            || lower.EndsWith(".asc", StringComparison.Ordinal)
+            || lower.EndsWith(".pem", StringComparison.Ordinal)
+            || lower.EndsWith(".sbom", StringComparison.Ordinal)
+            || lower.EndsWith(".txt", StringComparison.Ordinal)
+            || lower.Contains("sha256sums", StringComparison.Ordinal)
+            || lower.Contains("checksums", StringComparison.Ordinal)
+            || lower.Contains("sha512sums", StringComparison.Ordinal);
+    }
+
+    [GeneratedRegex(@"[-_.\s()\[\]]+")]
+    private static partial Regex TokenSplit();
+}
