@@ -8,4 +8,6 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
   </PropertyGroup>
+
+  <Import Project="Directory.Build.user" Condition="Exists('Directory.Build.user')" />
 </Project>
