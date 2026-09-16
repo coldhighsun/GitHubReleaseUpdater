@@ -1,6 +1,6 @@
-using System.Text.RegularExpressions;
 using GitHubReleaseUpdater.GitHub.Models;
 using GitHubReleaseUpdater.Versioning;
+using System.Text.RegularExpressions;
 
 namespace GitHubReleaseUpdater.Assets;
 
@@ -11,11 +11,24 @@ namespace GitHubReleaseUpdater.Assets;
 /// </summary>
 public sealed class PatternAssetSelector : IAssetSelector
 {
+    /// <summary>
+    /// The configured file-name pattern, with placeholders not yet expanded.
+    /// </summary>
     private readonly string _pattern;
+
+    /// <summary>
+    /// Runtime used to resolve the <c>{os}</c>/<c>{arch}</c>/<c>{rid}</c> placeholders.
+    /// </summary>
     private readonly RuntimeInfo _runtime;
+
+    /// <summary>
+    /// Tag prefix to strip when resolving <c>{version}</c>.
+    /// </summary>
     private readonly string? _tagPrefix;
 
-    /// <summary>Creates a selector.</summary>
+    /// <summary>
+    /// Creates a selector.
+    /// </summary>
     /// <param name="pattern">e.g. <c>myapp-{rid}.zip</c>, <c>myapp-*-{os}-{arch}.tar.gz</c>, <c>myapp-{version}-setup.exe</c>.</param>
     /// <param name="runtime">Runtime for the <c>{os}</c>/<c>{arch}</c>/<c>{rid}</c> placeholders; defaults to the current process.</param>
     /// <param name="tagPrefix">Tag prefix to strip when resolving <c>{version}</c>.</param>
@@ -27,7 +40,9 @@ public sealed class PatternAssetSelector : IAssetSelector
         _tagPrefix = tagPrefix;
     }
 
-    /// <summary>The configured pattern.</summary>
+    /// <summary>
+    /// The configured pattern.
+    /// </summary>
     public string Pattern => _pattern;
 
     /// <inheritdoc />
@@ -38,6 +53,9 @@ public sealed class PatternAssetSelector : IAssetSelector
         return release.Assets.FirstOrDefault(a => regex.IsMatch(a.Name));
     }
 
+    /// <summary>
+    /// Expands the pattern's placeholders for <paramref name="release"/> and compiles it into a wildcard-matching regex.
+    /// </summary>
     private Regex BuildRegex(GitHubRelease release)
     {
         var version = SemanticVersion.TryParse(release.TagName, out var v, _tagPrefix) ? v.ToString() : release.TagName;

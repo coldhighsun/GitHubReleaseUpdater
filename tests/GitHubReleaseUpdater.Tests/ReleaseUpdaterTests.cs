@@ -8,7 +8,14 @@ namespace GitHubReleaseUpdater.Tests;
 
 public class ReleaseUpdaterTests : IDisposable
 {
+    /// <summary>
+    /// Temporary directory used as the download destination, removed after each test.
+    /// </summary>
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "gru-tests-" + Guid.NewGuid().ToString("N"));
+
+    /// <summary>
+    /// Fixed Windows x64 runtime used so asset selection is deterministic regardless of the host OS.
+    /// </summary>
     private static readonly RuntimeInfo Win64 = new("win", "x64");
 
     public void Dispose()
@@ -16,6 +23,9 @@ public class ReleaseUpdaterTests : IDisposable
         if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);
     }
 
+    /// <summary>
+    /// Builds test <see cref="UpdaterOptions"/> for a fixed owner/repo and Windows x64 runtime.
+    /// </summary>
     private static UpdaterOptions Options(string current, bool prerelease = false, IChecksumProvider? checksums = null, bool require = false) => new()
     {
         Owner = "o",

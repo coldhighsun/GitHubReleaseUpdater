@@ -13,22 +13,52 @@ namespace GitHubReleaseUpdater;
 /// </summary>
 public sealed class ReleaseUpdater : IDisposable
 {
+    /// <summary>
+    /// The options this updater was created with.
+    /// </summary>
     private readonly UpdaterOptions _options;
+
+    /// <summary>
+    /// The GitHub client used to query releases and download assets.
+    /// </summary>
     private readonly IGitHubReleaseClient _client;
+
+    /// <summary>
+    /// True when this updater created <see cref="_client"/> and is responsible for disposing it.
+    /// </summary>
     private readonly bool _ownsClient;
+
+    /// <summary>
+    /// Chooses which asset of a release to download.
+    /// </summary>
     private readonly IAssetSelector _selector;
+
+    /// <summary>
+    /// Resolves the expected checksum for a downloaded asset.
+    /// </summary>
     private readonly IChecksumProvider _checksums;
+
+    /// <summary>
+    /// Streams asset bytes to disk with progress reporting.
+    /// </summary>
     private readonly AssetDownloader _downloader;
 
-    /// <summary>Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.</summary>
+    /// <summary>
+    /// Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.
+    /// </summary>
     public ReleaseUpdater(UpdaterOptions options)
         : this(options, new GitHubReleaseClient(options?.BaseUrl, options?.Token, options?.UserAgent, options?.HttpClient), ownsClient: true)
     {
     }
 
-    /// <summary>Creates an updater over a caller-supplied client (useful for testing or custom transports).</summary>
+    /// <summary>
+    /// Creates an updater over a caller-supplied client (useful for testing or custom transports).
+    /// </summary>
     public ReleaseUpdater(UpdaterOptions options, IGitHubReleaseClient client) : this(options, client, ownsClient: false) { }
 
+    /// <summary>
+    /// Validates <paramref name="options"/> and wires up the selector, checksum provider and downloader.
+    /// </summary>
     private ReleaseUpdater(UpdaterOptions options, IGitHubReleaseClient client, bool ownsClient)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -47,10 +77,14 @@ public sealed class ReleaseUpdater : IDisposable
         _downloader = new AssetDownloader(client);
     }
 
-    /// <summary>The options this updater was created with.</summary>
+    /// <summary>
+    /// The options this updater was created with.
+    /// </summary>
     public UpdaterOptions Options => _options;
 
-    /// <summary>The underlying GitHub client.</summary>
+    /// <summary>
+    /// The underlying GitHub client.
+    /// </summary>
     public IGitHubReleaseClient Client => _client;
 
     /// <summary>
@@ -123,7 +157,9 @@ public sealed class ReleaseUpdater : IDisposable
         return DownloadAsync(check.Release, check.SelectedAsset, directory, progress, cancellationToken);
     }
 
-    /// <summary>Downloads and verifies an explicit asset of a release.</summary>
+    /// <summary>
+    /// Downloads and verifies an explicit asset of a release.
+    /// </summary>
     public async Task<DownloadResult> DownloadAsync(GitHubRelease release, GitHubAsset asset, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -156,6 +192,9 @@ public sealed class ReleaseUpdater : IDisposable
         return new DownloadResult(path, asset, actual, verified: expected is not null);
     }
 
+    /// <summary>
+    /// Deletes a file if it exists, silently ignoring I/O and permission errors.
+    /// </summary>
     private static void TryDelete(string path)
     {
         try

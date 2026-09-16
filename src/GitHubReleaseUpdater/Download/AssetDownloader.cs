@@ -5,20 +5,34 @@ using GitHubReleaseUpdater.GitHub.Models;
 
 namespace GitHubReleaseUpdater.Download;
 
-/// <summary>Streams a release asset to disk with progress reporting and cancellation.</summary>
+/// <summary>
+/// Streams a release asset to disk with progress reporting and cancellation.
+/// </summary>
 public sealed class AssetDownloader
 {
+    /// <summary>
+    /// Suffix appended to the in-progress download file before it is renamed to its final name.
+    /// </summary>
     private const string PartialSuffix = ".partial";
 
+    /// <summary>
+    /// The GitHub client used to open the asset stream.
+    /// </summary>
     private readonly IGitHubReleaseClient _client;
 
-    /// <summary>Buffer size used when copying the response stream.</summary>
+    /// <summary>
+    /// Buffer size used when copying the response stream.
+    /// </summary>
     public int BufferSize { get; init; } = 81920;
 
-    /// <summary>Minimum interval between progress callbacks.</summary>
+    /// <summary>
+    /// Minimum interval between progress callbacks.
+    /// </summary>
     public TimeSpan ProgressInterval { get; init; } = TimeSpan.FromMilliseconds(200);
 
-    /// <summary>Creates a downloader.</summary>
+    /// <summary>
+    /// Creates a downloader.
+    /// </summary>
     public AssetDownloader(IGitHubReleaseClient client)
     {
         ArgumentNullException.ThrowIfNull(client);
@@ -75,6 +89,10 @@ public sealed class AssetDownloader
         }
     }
 
+    /// <summary>
+    /// Copies <paramref name="source"/> to <paramref name="target"/> in <see cref="BufferSize"/> chunks, reporting
+    /// progress at most every <see cref="ProgressInterval"/> and throwing if the received byte count falls short of <paramref name="total"/>.
+    /// </summary>
     private async Task CopyWithProgressAsync(Stream source, Stream target, long? total, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
     {
         var buffer = new byte[BufferSize];
@@ -101,13 +119,18 @@ public sealed class AssetDownloader
         progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed));
     }
 
-    // Fixed cross-platform set (not Path.GetInvalidFileNameChars(), which varies by OS and
-    // would leave e.g. ':' and '?' unsanitized when running on Linux CI).
+    /// <summary>
+    /// Fixed cross-platform set (not <see cref="Path.GetInvalidFileNameChars"/>, which varies by OS and
+    /// would leave e.g. ':' and '?' unsanitized when running on Linux CI).
+    /// </summary>
     private static readonly char[] InvalidFileNameChars =
         "\"<>|:*?/\\".ToCharArray()
             .Concat(Enumerable.Range(0, 32).Select(i => (char)i))
             .ToArray();
 
+    /// <summary>
+    /// Replaces invalid file-name characters with <c>_</c> and rejects names that are empty or refer to the current/parent directory.
+    /// </summary>
     private static string SanitizeFileName(string name)
     {
         var cleaned = new string(name.Select(c => InvalidFileNameChars.Contains(c) ? '_' : c).ToArray()).Trim();
@@ -116,6 +139,9 @@ public sealed class AssetDownloader
         return cleaned;
     }
 
+    /// <summary>
+    /// Deletes a file if it exists, silently ignoring I/O and permission errors.
+    /// </summary>
     private static void TryDelete(string path)
     {
         try

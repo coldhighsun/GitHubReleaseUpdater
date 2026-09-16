@@ -2,19 +2,29 @@ using System.Net;
 
 namespace GitHubReleaseUpdater.Exceptions;
 
-/// <summary>Raised when the GitHub API returns an unsuccessful response.</summary>
+/// <summary>
+/// Raised when the GitHub API returns an unsuccessful response.
+/// </summary>
 public sealed class GitHubApiException : UpdaterException
 {
-    /// <summary>HTTP status code returned by GitHub.</summary>
+    /// <summary>
+    /// HTTP status code returned by GitHub.
+    /// </summary>
     public HttpStatusCode StatusCode { get; }
 
-    /// <summary>True when the request was rejected due to rate limiting.</summary>
+    /// <summary>
+    /// True when the request was rejected due to rate limiting.
+    /// </summary>
     public bool IsRateLimited { get; }
 
-    /// <summary>When the rate limit resets, if the response carried <c>X-RateLimit-Reset</c>.</summary>
+    /// <summary>
+    /// When the rate limit resets, if the response carried <c>X-RateLimit-Reset</c>.
+    /// </summary>
     public DateTimeOffset? RateLimitResetAt { get; }
 
-    /// <summary>Raw response body (may be empty).</summary>
+    /// <summary>
+    /// Raw response body (may be empty).
+    /// </summary>
     public string ResponseBody { get; }
 
     /// <inheritdoc />
@@ -29,7 +39,9 @@ public sealed class GitHubApiException : UpdaterException
         ResponseBody = string.Empty;
     }
 
-    /// <summary>Creates a new instance.</summary>
+    /// <summary>
+    /// Creates a new instance.
+    /// </summary>
     public GitHubApiException(string message, HttpStatusCode statusCode, bool isRateLimited, DateTimeOffset? rateLimitResetAt, string responseBody)
         : base(message)
     {

@@ -10,13 +10,24 @@ namespace GitHubReleaseUpdater.Assets;
 /// </summary>
 public sealed partial class RuntimeAssetSelector : IAssetSelector
 {
+    /// <summary>
+    /// Target OS/architecture to match asset names against.
+    /// </summary>
     private readonly RuntimeInfo _runtime;
+
+    /// <summary>
+    /// Extensions that break ties between otherwise equally scored assets; earlier entries win.
+    /// </summary>
     private readonly IReadOnlyCollection<string> _preferredExtensions;
 
-    /// <summary>Creates a selector for the current runtime.</summary>
+    /// <summary>
+    /// Creates a selector for the current runtime.
+    /// </summary>
     public RuntimeAssetSelector() : this(RuntimeInfo.Current) { }
 
-    /// <summary>Creates a selector for a specific runtime.</summary>
+    /// <summary>
+    /// Creates a selector for a specific runtime.
+    /// </summary>
     /// <param name="runtime">Target OS/arch.</param>
     /// <param name="preferredExtensions">Optional extensions (e.g. <c>.zip</c>, <c>.msi</c>) that break ties; earlier entries win.</param>
     public RuntimeAssetSelector(RuntimeInfo runtime, params string[] preferredExtensions)
@@ -48,6 +59,10 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
         return best;
     }
 
+    /// <summary>
+    /// Scores an asset's file name by how well it matches the target OS/architecture and preferred extensions;
+    /// returns 0 when the name explicitly names a different OS or architecture, or matches neither.
+    /// </summary>
     private int Score(string name, string[] osTokens, string[] archTokens)
     {
         var tokens = TokenizeName(name);
@@ -85,6 +100,9 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
         return score;
     }
 
+    /// <summary>
+    /// Lowercases and splits a file name into tokens, normalizing common compound OS/arch aliases first.
+    /// </summary>
     private static string[] TokenizeName(string name)
     {
         // Collapse compound aliases that contain separators so they survive tokenization.
@@ -96,7 +114,9 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
         return TokenSplit().Split(normalized).Where(t => t.Length > 0).ToArray();
     }
 
-    /// <summary>True for checksum, signature and similar sidecar files.</summary>
+    /// <summary>
+    /// True for checksum, signature and similar sidecar files.
+    /// </summary>
     public static bool IsMetadataFile(string name)
     {
         var lower = name.ToLowerInvariant();
@@ -114,6 +134,9 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
             || lower.Contains("sha512sums", StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Regex that splits a file name into tokens on separator characters.
+    /// </summary>
     [GeneratedRegex(@"[-_.\s()\[\]]+")]
     private static partial Regex TokenSplit();
 }

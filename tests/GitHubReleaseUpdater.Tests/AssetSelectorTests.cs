@@ -4,6 +4,9 @@ namespace GitHubReleaseUpdater.Tests;
 
 public class AssetSelectorTests
 {
+    /// <summary>
+    /// Representative asset file names covering common release naming conventions across platforms.
+    /// </summary>
     private static readonly string[] TypicalAssets =
     [
         "myapp-1.2.3-win-x64.zip",

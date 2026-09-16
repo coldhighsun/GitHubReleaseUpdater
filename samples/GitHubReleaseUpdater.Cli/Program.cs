@@ -10,6 +10,9 @@ return await Cli.RunAsync(args);
 
 internal static class Cli
 {
+    /// <summary>
+    /// CLI usage text shown for <c>--help</c> and on argument errors.
+    /// </summary>
     private const string Usage = """
         GitHubReleaseUpdater sample CLI
 
@@ -135,6 +138,9 @@ internal static class Cli
         }
     }
 
+    /// <summary>
+    /// Parses <c>--key value</c>/<c>--key=value</c>/<c>--flag</c> style arguments into a case-insensitive map.
+    /// </summary>
     private static Dictionary<string, string?> ParseArgs(IEnumerable<string> args)
     {
         var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -161,6 +167,9 @@ internal static class Cli
         return result;
     }
 
+    /// <summary>
+    /// Returns the value of a required option, or prints usage and exits the process when it is missing.
+    /// </summary>
     private static string Require(Dictionary<string, string?> opts, string key)
     {
         if (opts.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v)) return v;
@@ -170,6 +179,9 @@ internal static class Cli
         return string.Empty;
     }
 
+    /// <summary>
+    /// Formats a byte count using the largest unit (B/KB/MB/GB) that keeps the value under 1024.
+    /// </summary>
     private static string FormatBytes(long bytes)
     {
         string[] units = ["B", "KB", "MB", "GB"];
@@ -179,8 +191,14 @@ internal static class Cli
         return string.Create(CultureInfo.InvariantCulture, $"{v:0.#} {units[u]}");
     }
 
+    /// <summary>
+    /// Renders download progress as a single overwritten console line.
+    /// </summary>
     private sealed class ConsoleProgress : IProgress<DownloadProgress>
     {
+        /// <summary>
+        /// Writes the current percentage, bytes transferred, speed and ETA to the console.
+        /// </summary>
         public void Report(DownloadProgress p)
         {
             var pct = p.Percentage is { } x ? string.Create(CultureInfo.InvariantCulture, $"{x,5:0.0}%") : "  ?  ";
