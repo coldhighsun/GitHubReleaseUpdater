@@ -5,9 +5,14 @@ using GitHubReleaseUpdater.GitHub.Models;
 
 namespace GitHubReleaseUpdater.Tests;
 
-/// <summary>Routes requests to canned responses by URL substring.</summary>
+/// <summary>
+/// Routes requests to canned responses by URL substring.
+/// </summary>
 internal sealed class StubHttpHandler : HttpMessageHandler
 {
+    /// <summary>
+    /// Registered (predicate, response factory) pairs tried in order for each request.
+    /// </summary>
     private readonly List<(Func<HttpRequestMessage, bool> Match, Func<HttpRequestMessage, HttpResponseMessage> Respond)> _routes = [];
 
     public List<HttpRequestMessage> Requests { get; } = [];
@@ -43,6 +48,9 @@ internal sealed class StubHttpHandler : HttpMessageHandler
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("{\"message\":\"Not Found\"}", Encoding.UTF8, "application/json") });
     }
 
+    /// <summary>
+    /// HTTP content that reports an unknown length, simulating a server that doesn't send <c>Content-Length</c>.
+    /// </summary>
     private sealed class StreamContentNoLength(byte[] data) : HttpContent
     {
         protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(data).AsTask();
@@ -72,7 +80,9 @@ internal static class TestData
     };
 }
 
-/// <summary>In-memory <see cref="IGitHubReleaseClient"/> for facade tests.</summary>
+/// <summary>
+/// In-memory <see cref="IGitHubReleaseClient"/> for facade tests.
+/// </summary>
 internal sealed class FakeReleaseClient : IGitHubReleaseClient
 {
     public GitHubRelease? Latest { get; set; }

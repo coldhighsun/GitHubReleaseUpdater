@@ -7,6 +7,9 @@ namespace GitHubReleaseUpdater.Tests;
 
 public class AssetDownloaderTests : IDisposable
 {
+    /// <summary>
+    /// Temporary directory used as the download destination, removed after each test.
+    /// </summary>
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "gru-tests-" + Guid.NewGuid().ToString("N"));
 
     public void Dispose()
@@ -100,12 +103,17 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal("a_b_.bin", Path.GetFileName(path));
     }
 
+    /// <summary>
+    /// Collects reported progress synchronously into a list for assertions.
+    /// </summary>
     private sealed class SyncProgress(List<DownloadProgress> sink) : IProgress<DownloadProgress>
     {
         public void Report(DownloadProgress value) => sink.Add(value);
     }
 
-    /// <summary>Client whose asset stream never yields data until cancelled.</summary>
+    /// <summary>
+    /// Client whose asset stream never yields data until cancelled.
+    /// </summary>
     private sealed class BlockingClient : IGitHubReleaseClient
     {
         public TaskCompletionSource Started { get; } = new();
@@ -118,6 +126,9 @@ public class AssetDownloaderTests : IDisposable
         public Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+        /// <summary>
+        /// Stream whose read never completes until the wrapping token is cancelled, signaling <paramref name="started"/> first.
+        /// </summary>
         private sealed class BlockingStream(TaskCompletionSource started) : Stream
         {
             public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)

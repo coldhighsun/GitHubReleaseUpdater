@@ -1,8 +1,13 @@
 namespace GitHubReleaseUpdater.Verification;
 
-/// <summary>Parses checksum files and digest strings.</summary>
+/// <summary>
+/// Parses checksum files and digest strings.
+/// </summary>
 public static class ChecksumParser
 {
+    /// <summary>
+    /// Length in hex characters of a SHA-256 digest.
+    /// </summary>
     private const int Sha256HexLength = 64;
 
     /// <summary>
@@ -73,7 +78,9 @@ public static class ChecksumParser
         return result;
     }
 
-    /// <summary>Looks up the digest for <paramref name="fileName"/> in a parsed sums map; falls back to a lone bare hash if present.</summary>
+    /// <summary>
+    /// Looks up the digest for <paramref name="fileName"/> in a parsed sums map; falls back to a lone bare hash if present.
+    /// </summary>
     public static string? FindFor(IReadOnlyDictionary<string, string> sums, string fileName)
     {
         if (sums.TryGetValue(fileName, out var h)) return h;
@@ -81,12 +88,18 @@ public static class ChecksumParser
         return null;
     }
 
+    /// <summary>
+    /// Strips any directory portion from a path, returning just the file name.
+    /// </summary>
     private static string FileNameOnly(string path)
     {
         var i = path.LastIndexOfAny(['/', '\\']);
         return i >= 0 ? path[(i + 1)..] : path;
     }
 
+    /// <summary>
+    /// True when <paramref name="s"/> is exactly <paramref name="length"/> hex digits.
+    /// </summary>
     private static bool IsHex(ReadOnlySpan<char> s, int length)
     {
         if (s.Length != length) return false;

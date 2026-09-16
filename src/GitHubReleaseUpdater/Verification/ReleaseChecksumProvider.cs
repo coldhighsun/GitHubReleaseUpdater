@@ -13,14 +13,22 @@ namespace GitHubReleaseUpdater.Verification;
 /// </summary>
 public sealed class ReleaseChecksumProvider : IChecksumProvider
 {
+    /// <summary>
+    /// Known exact file names of aggregate SHA-256 sums files.
+    /// </summary>
     private static readonly string[] AggregateNames =
     [
         "sha256sums", "sha256sums.txt", "sha256sum.txt", "sha256sum", "checksums.txt", "checksums", "checksums.sha256", "sha256.txt",
     ];
 
+    /// <summary>
+    /// The GitHub client used to read sidecar and aggregate checksum assets.
+    /// </summary>
     private readonly IGitHubReleaseClient _client;
 
-    /// <summary>Creates a provider that reads sidecar/aggregate files through <paramref name="client"/>.</summary>
+    /// <summary>
+    /// Creates a provider that reads sidecar/aggregate files through <paramref name="client"/>.
+    /// </summary>
     public ReleaseChecksumProvider(IGitHubReleaseClient client)
     {
         ArgumentNullException.ThrowIfNull(client);
@@ -54,7 +62,9 @@ public sealed class ReleaseChecksumProvider : IChecksumProvider
         return ChecksumParser.NormalizeDigest(asset.Digest);
     }
 
-    /// <summary>True when the name looks like an aggregate SHA-256 sums file.</summary>
+    /// <summary>
+    /// True when the name looks like an aggregate SHA-256 sums file.
+    /// </summary>
     public static bool IsAggregate(string name)
     {
         var lower = name.ToLowerInvariant();

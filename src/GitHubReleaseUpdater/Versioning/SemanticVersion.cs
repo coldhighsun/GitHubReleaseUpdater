@@ -9,21 +9,35 @@ namespace GitHubReleaseUpdater.Versioning;
 /// </summary>
 public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<SemanticVersion>
 {
-    /// <summary>Major version.</summary>
+    /// <summary>
+    /// Major version.
+    /// </summary>
     public int Major { get; }
-    /// <summary>Minor version.</summary>
+    /// <summary>
+    /// Minor version.
+    /// </summary>
     public int Minor { get; }
-    /// <summary>Patch version.</summary>
+    /// <summary>
+    /// Patch version.
+    /// </summary>
     public int Patch { get; }
-    /// <summary>Pre-release identifiers, e.g. <c>beta.1</c>. Empty for a stable release.</summary>
+    /// <summary>
+    /// Pre-release identifiers, e.g. <c>beta.1</c>. Empty for a stable release.
+    /// </summary>
     public string Prerelease { get; }
-    /// <summary>Build metadata (ignored when comparing).</summary>
+    /// <summary>
+    /// Build metadata (ignored when comparing).
+    /// </summary>
     public string BuildMetadata { get; }
 
-    /// <summary>True when <see cref="Prerelease"/> is non-empty.</summary>
+    /// <summary>
+    /// True when <see cref="Prerelease"/> is non-empty.
+    /// </summary>
     public bool IsPrerelease => Prerelease.Length > 0;
 
-    /// <summary>Creates a version from its components.</summary>
+    /// <summary>
+    /// Creates a version from its components.
+    /// </summary>
     public SemanticVersion(int major, int minor, int patch, string? prerelease = null, string? buildMetadata = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(major);
@@ -36,13 +50,17 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         BuildMetadata = buildMetadata ?? string.Empty;
     }
 
-    /// <summary>Parses a version string, throwing <see cref="VersionParseException"/> on failure.</summary>
+    /// <summary>
+    /// Parses a version string, throwing <see cref="VersionParseException"/> on failure.
+    /// </summary>
     /// <param name="input">Version text such as <c>v1.2.3-beta.1+build.5</c>.</param>
     /// <param name="tagPrefix">Optional prefix to strip before parsing (a leading <c>v</c>/<c>V</c> is always accepted).</param>
     public static SemanticVersion Parse(string input, string? tagPrefix = null)
         => TryParse(input, out var v, tagPrefix) ? v : throw new VersionParseException(input);
 
-    /// <summary>Attempts to parse a version string.</summary>
+    /// <summary>
+    /// Attempts to parse a version string.
+    /// </summary>
     public static bool TryParse([NotNullWhen(true)] string? input, [NotNullWhen(true)] out SemanticVersion? version, string? tagPrefix = null)
     {
         version = null;
@@ -91,6 +109,9 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         return true;
     }
 
+    /// <summary>
+    /// Parses a major/minor/patch numeric piece, rejecting empty, oversized or leading-zero values.
+    /// </summary>
     private static bool TryParseNumeric(ReadOnlySpan<char> piece, out int value)
     {
         value = 0;
@@ -103,6 +124,10 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         return int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out value);
     }
 
+    /// <summary>
+    /// Validates a dot-separated identifier chain (prerelease or build metadata) per semver's character
+    /// and leading-zero rules.
+    /// </summary>
     private static bool IsValidIdentifierChain(string chain, bool allowLeadingZeros)
     {
         foreach (var id in chain.Split('.'))
@@ -133,6 +158,10 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         return ComparePrerelease(Prerelease, other.Prerelease);
     }
 
+    /// <summary>
+    /// Compares two prerelease identifier strings per semver precedence rules (numeric identifiers compare
+    /// numerically and rank lower than alphanumeric ones; a stable version outranks any prerelease).
+    /// </summary>
     private static int ComparePrerelease(string a, string b)
     {
         // A stable version has higher precedence than a pre-release of the same core.
@@ -172,10 +201,14 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         return core;
     }
 
-    /// <summary>Implicit conversion from string using <see cref="Parse(string, string?)"/>.</summary>
+    /// <summary>
+    /// Implicit conversion from string using <see cref="Parse(string, string?)"/>.
+    /// </summary>
     public static implicit operator SemanticVersion(string value) => Parse(value);
 
-    /// <summary>Converts a <see cref="Version"/> (e.g. from an assembly) to a semantic version, dropping the revision.</summary>
+    /// <summary>
+    /// Converts a <see cref="Version"/> (e.g. from an assembly) to a semantic version, dropping the revision.
+    /// </summary>
     public static SemanticVersion FromVersion(Version version)
     {
         ArgumentNullException.ThrowIfNull(version);

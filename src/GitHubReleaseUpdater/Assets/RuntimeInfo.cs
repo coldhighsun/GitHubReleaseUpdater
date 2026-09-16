@@ -2,15 +2,24 @@ using System.Runtime.InteropServices;
 
 namespace GitHubReleaseUpdater.Assets;
 
-/// <summary>Describes the OS / architecture an asset should target. Defaults to the current process.</summary>
+/// <summary>
+/// Describes the OS / architecture an asset should target. Defaults to the current process.
+/// </summary>
 public sealed record RuntimeInfo(string Os, string Arch)
 {
-    /// <summary>Runtime identifier in the <c>os-arch</c> form, e.g. <c>win-x64</c>.</summary>
+    /// <summary>
+    /// Runtime identifier in the <c>os-arch</c> form, e.g. <c>win-x64</c>.
+    /// </summary>
     public string Rid => $"{Os}-{Arch}";
 
-    /// <summary>Detects the current OS and architecture.</summary>
+    /// <summary>
+    /// Detects the current OS and architecture.
+    /// </summary>
     public static RuntimeInfo Current { get; } = Detect();
 
+    /// <summary>
+    /// Maps the current process's OS platform and architecture to their canonical names.
+    /// </summary>
     private static RuntimeInfo Detect()
     {
         var os = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "win"
@@ -29,7 +38,9 @@ public sealed record RuntimeInfo(string Os, string Arch)
         return new RuntimeInfo(os, arch);
     }
 
-    /// <summary>Aliases commonly used in asset file names for each canonical OS name.</summary>
+    /// <summary>
+    /// Aliases commonly used in asset file names for each canonical OS name.
+    /// </summary>
     public static IReadOnlyDictionary<string, string[]> OsAliases { get; } = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
     {
         ["win"] = ["win", "windows", "win32", "win64"],
@@ -38,7 +49,9 @@ public sealed record RuntimeInfo(string Os, string Arch)
         ["freebsd"] = ["freebsd"],
     };
 
-    /// <summary>Aliases commonly used in asset file names for each canonical architecture name.</summary>
+    /// <summary>
+    /// Aliases commonly used in asset file names for each canonical architecture name.
+    /// </summary>
     public static IReadOnlyDictionary<string, string[]> ArchAliases { get; } = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
     {
         ["x64"] = ["x64", "amd64", "x86_64", "x86-64", "64bit", "64-bit"],

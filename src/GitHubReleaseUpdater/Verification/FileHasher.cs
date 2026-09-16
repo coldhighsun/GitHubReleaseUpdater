@@ -2,10 +2,14 @@ using System.Security.Cryptography;
 
 namespace GitHubReleaseUpdater.Verification;
 
-/// <summary>Computes file hashes without loading the whole file into memory.</summary>
+/// <summary>
+/// Computes file hashes without loading the whole file into memory.
+/// </summary>
 public static class FileHasher
 {
-    /// <summary>Computes the SHA-256 hash of a file and returns it as lowercase hex.</summary>
+    /// <summary>
+    /// Computes the SHA-256 hash of a file and returns it as lowercase hex.
+    /// </summary>
     public static async Task<string> Sha256Async(string path, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -14,7 +18,9 @@ public static class FileHasher
         return Convert.ToHexStringLower(hash);
     }
 
-    /// <summary>Case-insensitive comparison of two hex digests, ignoring surrounding whitespace.</summary>
+    /// <summary>
+    /// Case-insensitive comparison of two hex digests, ignoring surrounding whitespace.
+    /// </summary>
     public static bool HashEquals(string? expected, string? actual)
         => expected is not null && actual is not null
            && expected.Trim().Equals(actual.Trim(), StringComparison.OrdinalIgnoreCase);

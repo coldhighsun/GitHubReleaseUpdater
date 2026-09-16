@@ -2,7 +2,9 @@ using GitHubReleaseUpdater.GitHub.Models;
 
 namespace GitHubReleaseUpdater.Verification;
 
-/// <summary>Supplies the expected SHA-256 digest for a release asset.</summary>
+/// <summary>
+/// Supplies the expected SHA-256 digest for a release asset.
+/// </summary>
 public interface IChecksumProvider
 {
     /// <summary>
@@ -12,12 +14,19 @@ public interface IChecksumProvider
     Task<string?> GetExpectedSha256Async(GitHubRelease release, GitHubAsset asset, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Returns a fixed digest supplied by the caller.</summary>
+/// <summary>
+/// Returns a fixed digest supplied by the caller.
+/// </summary>
 public sealed class StaticChecksumProvider : IChecksumProvider
 {
+    /// <summary>
+    /// The normalized lowercase hex SHA-256 returned for every asset.
+    /// </summary>
     private readonly string _sha256;
 
-    /// <summary>Creates a provider with a known hex SHA-256 (with or without a <c>sha256:</c> prefix).</summary>
+    /// <summary>
+    /// Creates a provider with a known hex SHA-256 (with or without a <c>sha256:</c> prefix).
+    /// </summary>
     public StaticChecksumProvider(string sha256)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sha256);
@@ -30,12 +39,19 @@ public sealed class StaticChecksumProvider : IChecksumProvider
         => Task.FromResult<string?>(_sha256);
 }
 
-/// <summary>Chains providers; the first non-null result wins.</summary>
+/// <summary>
+/// Chains providers; the first non-null result wins.
+/// </summary>
 public sealed class CompositeChecksumProvider : IChecksumProvider
 {
+    /// <summary>
+    /// Providers tried in order until one returns a non-null digest.
+    /// </summary>
     private readonly IReadOnlyList<IChecksumProvider> _providers;
 
-    /// <summary>Creates a composite over the given providers, in priority order.</summary>
+    /// <summary>
+    /// Creates a composite over the given providers, in priority order.
+    /// </summary>
     public CompositeChecksumProvider(params IChecksumProvider[] providers)
     {
         ArgumentNullException.ThrowIfNull(providers);

@@ -1,6 +1,8 @@
 namespace GitHubReleaseUpdater.Exceptions;
 
-/// <summary>Base class for all exceptions raised by this library.</summary>
+/// <summary>
+/// Base class for all exceptions raised by this library.
+/// </summary>
 public class UpdaterException : Exception
 {
     /// <inheritdoc />

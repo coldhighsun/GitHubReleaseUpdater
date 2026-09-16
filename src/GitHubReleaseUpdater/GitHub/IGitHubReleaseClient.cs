@@ -2,7 +2,9 @@ using GitHubReleaseUpdater.GitHub.Models;
 
 namespace GitHubReleaseUpdater.GitHub;
 
-/// <summary>Read-only access to a repository's releases and their assets.</summary>
+/// <summary>
+/// Read-only access to a repository's releases and their assets.
+/// </summary>
 public interface IGitHubReleaseClient
 {
     /// <summary>
@@ -12,13 +14,15 @@ public interface IGitHubReleaseClient
     Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Gets a release by tag name. Returns null when not found.
+    /// </summary>
+    Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Lists releases, newest first (<c>GET /repos/{owner}/{repo}/releases</c>).
     /// Drafts are included only when the token has write access; callers should filter them.
     /// </summary>
     Task<IReadOnlyList<GitHubRelease>> ListReleasesAsync(string owner, string repo, int perPage = 30, int page = 1, CancellationToken cancellationToken = default);
-
-    /// <summary>Gets a release by tag name. Returns null when not found.</summary>
-    Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Opens a stream for an asset's content. Uses the asset API endpoint with
@@ -26,27 +30,46 @@ public interface IGitHubReleaseClient
     /// </summary>
     Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default);
 
-    /// <summary>Downloads a small text asset (e.g. a checksum file) fully into memory.</summary>
+    /// <summary>
+    /// Downloads a small text asset (e.g. a checksum file) fully into memory.
+    /// </summary>
     Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default);
 }
 
-/// <summary>A response stream together with the content length reported by the server, if any.</summary>
+/// <summary>
+/// A response stream together with the content length reported by the server, if any.
+/// </summary>
 public sealed class AssetStream : IAsyncDisposable, IDisposable
 {
+    /// <summary>
+    /// The underlying HTTP response (or other resource) that owns the stream's lifetime.
+    /// </summary>
     private readonly IDisposable _owner;
 
-    /// <summary>The content stream.</summary>
-    public Stream Stream { get; }
-
-    /// <summary>Content length from the response headers, or null when unknown.</summary>
-    public long? ContentLength { get; }
-
-    /// <summary>Creates a new instance; <paramref name="owner"/> is disposed together with the stream.</summary>
+    /// <summary>
+    /// Creates a new instance; <paramref name="owner"/> is disposed together with the stream.
+    /// </summary>
     public AssetStream(Stream stream, long? contentLength, IDisposable owner)
     {
         Stream = stream;
         ContentLength = contentLength;
         _owner = owner;
+    }
+
+    /// <summary>
+    /// Content length from the response headers, or null when unknown.
+    /// </summary>
+    public long? ContentLength
+    {
+        get;
+    }
+
+    /// <summary>
+    /// The content stream.
+    /// </summary>
+    public Stream Stream
+    {
+        get;
     }
 
     /// <inheritdoc />
