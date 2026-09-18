@@ -11,17 +11,34 @@ namespace GitHubReleaseUpdater;
 /// <summary>
 /// High-level entry point: check a GitHub repository for a newer release, download the matching asset and verify it.
 /// </summary>
+/// <remarks>
+/// When <see cref="UpdaterOptions.HttpClient"/> is left null, every <see cref="ReleaseUpdater"/> created this
+/// way shares one process-wide <see cref="HttpClient"/> internally, so constructing a new instance per check
+/// does not create a new connection pool each time. If you instead supply your own
+/// <see cref="UpdaterOptions.HttpClient"/> (e.g. from <c>IHttpClientFactory</c>), the usual guidance applies:
+/// reuse that client rather than creating one per check.
+/// </remarks>
 public sealed class ReleaseUpdater : IDisposable
 {
     /// <summary>
-    /// The options this updater was created with.
+    /// Resolves the expected checksum for a downloaded asset.
     /// </summary>
-    private readonly UpdaterOptions _options;
+    private readonly IChecksumProvider _checksums;
 
     /// <summary>
     /// The GitHub client used to query releases and download assets.
     /// </summary>
     private readonly IGitHubReleaseClient _client;
+
+    /// <summary>
+    /// Streams asset bytes to disk with progress reporting.
+    /// </summary>
+    private readonly AssetDownloader _downloader;
+
+    /// <summary>
+    /// The options this updater was created with.
+    /// </summary>
+    private readonly UpdaterOptions _options;
 
     /// <summary>
     /// True when this updater created <see cref="_client"/> and is responsible for disposing it.
@@ -32,16 +49,6 @@ public sealed class ReleaseUpdater : IDisposable
     /// Chooses which asset of a release to download.
     /// </summary>
     private readonly IAssetSelector _selector;
-
-    /// <summary>
-    /// Resolves the expected checksum for a downloaded asset.
-    /// </summary>
-    private readonly IChecksumProvider _checksums;
-
-    /// <summary>
-    /// Streams asset bytes to disk with progress reporting.
-    /// </summary>
-    private readonly AssetDownloader _downloader;
 
     /// <summary>
     /// Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.
@@ -78,14 +85,14 @@ public sealed class ReleaseUpdater : IDisposable
     }
 
     /// <summary>
-    /// The options this updater was created with.
-    /// </summary>
-    public UpdaterOptions Options => _options;
-
-    /// <summary>
     /// The underlying GitHub client.
     /// </summary>
     public IGitHubReleaseClient Client => _client;
+
+    /// <summary>
+    /// The options this updater was created with.
+    /// </summary>
+    public UpdaterOptions Options => _options;
 
     /// <summary>
     /// Determines the newest applicable release and whether it is newer than <see cref="UpdaterOptions.CurrentVersion"/>.
@@ -93,6 +100,14 @@ public sealed class ReleaseUpdater : IDisposable
     /// </summary>
     public async Task<UpdateCheckResult> CheckForUpdateAsync(CancellationToken cancellationToken = default)
     {
+        var store = _options.LastCheckStore;
+        if (store is not null && _options.MinimumCheckInterval is { } interval)
+        {
+            var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
+            if (lastChecked is not null && DateTimeOffset.UtcNow - lastChecked.Value < interval)
+                return UpdateCheckResult.ThrottledResult(_options.CurrentVersion);
+        }
+
         var skipped = new List<string>();
         GitHubRelease? best = null;
         SemanticVersion? bestVersion = null;
@@ -132,11 +147,28 @@ public sealed class ReleaseUpdater : IDisposable
             }
         }
 
-        GitHubAsset? asset = null;
-        if (best is not null && bestVersion is not null && bestVersion > _options.CurrentVersion)
-            asset = _selector.Select(best);
+        var isUpdateAvailable = best is not null && bestVersion is not null && bestVersion > _options.CurrentVersion;
+        if (isUpdateAvailable && store is not null)
+        {
+            var skippedVersion = await store.GetSkippedVersionAsync(cancellationToken).ConfigureAwait(false);
+            if (skippedVersion is not null && bestVersion == skippedVersion)
+                isUpdateAvailable = false;
+        }
 
-        return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped);
+        GitHubAsset? asset = null;
+        if (isUpdateAvailable)
+            asset = _selector.Select(best!);
+
+        if (store is not null)
+            await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+
+        return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_ownsClient && _client is IDisposable d) d.Dispose();
     }
 
     /// <summary>
@@ -148,13 +180,12 @@ public sealed class ReleaseUpdater : IDisposable
     public Task<DownloadResult> DownloadAsync(UpdateCheckResult check, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(check);
-        if (!check.IsUpdateAvailable || check.Release is null)
-            throw new InvalidOperationException("No update is available.");
-        if (check.SelectedAsset is null)
+        var update = check.Update ?? throw new InvalidOperationException("No update is available.");
+        if (update.SelectedAsset is null)
             throw new AssetNotFoundException(
-                $"No asset in release {check.Release.TagName} matched the configured selector.",
-                check.Release.Assets.Select(a => a.Name).ToArray());
-        return DownloadAsync(check.Release, check.SelectedAsset, directory, progress, cancellationToken);
+                $"No asset in release {update.Release.TagName} matched the configured selector.",
+                update.Release.Assets.Select(a => a.Name).ToArray());
+        return DownloadAsync(update.Release, update.SelectedAsset, directory, progress, cancellationToken);
     }
 
     /// <summary>
@@ -203,11 +234,5 @@ public sealed class ReleaseUpdater : IDisposable
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
-    }
-
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        if (_ownsClient && _client is IDisposable d) d.Dispose();
     }
 }
