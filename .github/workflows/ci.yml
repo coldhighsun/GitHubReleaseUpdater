@@ -39,8 +39,10 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
         fail_ci_if_error: false
     - name: Pack
+      if: startsWith(github.ref, 'refs/tags/v')
       run: dotnet pack src/GitHubReleaseUpdater/GitHubReleaseUpdater.csproj --no-build -c Release -o ./artifacts
     - name: Upload package artifact
+      if: startsWith(github.ref, 'refs/tags/v')
       uses: actions/upload-artifact@v4
       with:
         name: nuget-package
