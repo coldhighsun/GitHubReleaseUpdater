@@ -91,7 +91,10 @@ if (check.Throttled)
 ```
 
 - `MinimumCheckInterval` throttles: a call inside the window returns `UpdateCheckResult.Throttled == true` without contacting GitHub.
-- `myStore.SetSkippedVersionAsync(version)` suppresses `IsUpdateAvailable`/`Update` for that version on future checks (it still shows up in `LatestVersion`, so you can still display "a newer version exists but was skipped").
+- `myStore.SetSkippedVersionAsync(version)` suppresses `IsUpdateAvailable`/`Update` for that version on future checks (it still shows up in `LatestVersion`, so you can still display "a newer version exists but was skipped"). Call `myStore.ClearSkippedVersionAsync()` to undo it — equivalent to `SetSkippedVersionAsync(null)`.
+- For a user-initiated "check now" that should still surface a version the user previously skipped, call `CheckForUpdateAsync(bypassSkippedVersion: true)`. Throttling and recording the check time still happen as usual — only the skipped-version filter is bypassed for that call.
+
+> **Breaking change:** `CheckForUpdateAsync` now takes `bypassSkippedVersion` before `cancellationToken`. A positional call like `CheckForUpdateAsync(cts.Token)` no longer compiles — pass it as `CheckForUpdateAsync(cancellationToken: cts.Token)` instead.
 
 ### HttpClient reuse
 
@@ -238,7 +241,10 @@ if (check.Throttled)
 ```
 
 - `MinimumCheckInterval` 用于节流：在时间窗口内的调用会直接返回 `UpdateCheckResult.Throttled == true`，不会请求 GitHub。
-- 调用 `myStore.SetSkippedVersionAsync(version)` 可以让该版本在之后的检查中不再触发 `IsUpdateAvailable`/`Update`（但仍会出现在 `LatestVersion` 里，所以你依然可以提示"有新版本但已被跳过"）。
+- 调用 `myStore.SetSkippedVersionAsync(version)` 可以让该版本在之后的检查中不再触发 `IsUpdateAvailable`/`Update`（但仍会出现在 `LatestVersion` 里，所以你依然可以提示"有新版本但已被跳过"）。调用 `myStore.ClearSkippedVersionAsync()` 可以撤销这个跳过——等价于 `SetSkippedVersionAsync(null)`。
+- 如果是用户主动点击的"立即检查"，希望仍然能看到之前被跳过的版本，可以调用 `CheckForUpdateAsync(bypassSkippedVersion: true)`：节流判断和检查时间的记录照常进行，只是这一次跳过版本过滤不生效。
+
+> **破坏性变更：** `CheckForUpdateAsync` 现在把 `bypassSkippedVersion` 放在 `cancellationToken` 之前。原来按位置传参的 `CheckForUpdateAsync(cts.Token)` 将无法编译，需要改成 `CheckForUpdateAsync(cancellationToken: cts.Token)`。
 
 ### HttpClient 复用
 

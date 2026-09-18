@@ -79,7 +79,7 @@ internal static class Cli
         try
         {
             Console.WriteLine($"Checking {owner}/{repo} (current {currentVersion}, runtime {RuntimeInfo.Current.Rid})...");
-            var check = await updater.CheckForUpdateAsync(cts.Token);
+            var check = await updater.CheckForUpdateAsync(cancellationToken: cts.Token);
 
             if (check.LatestVersion is null)
             {

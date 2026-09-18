@@ -98,7 +98,14 @@ public sealed class ReleaseUpdater : IDisposable
     /// Determines the newest applicable release and whether it is newer than <see cref="UpdaterOptions.CurrentVersion"/>.
     /// Never throws for "no update"; throws <see cref="GitHubApiException"/> on API failures.
     /// </summary>
-    public async Task<UpdateCheckResult> CheckForUpdateAsync(CancellationToken cancellationToken = default)
+    /// <param name="bypassSkippedVersion">
+    /// When true, ignores any version recorded via <see cref="LastCheck.ILastCheckStore.SetSkippedVersionAsync"/>
+    /// for this call. Throttling against <see cref="UpdaterOptions.MinimumCheckInterval"/> and recording the check
+    /// time via <see cref="LastCheck.ILastCheckStore.SetLastCheckedAtAsync"/> still happen as usual. Useful for a
+    /// user-initiated "check now" that should still surface a version the user previously dismissed.
+    /// </param>
+    /// <param name="cancellationToken"></param>
+    public async Task<UpdateCheckResult> CheckForUpdateAsync(bool bypassSkippedVersion = false, CancellationToken cancellationToken = default)
     {
         var store = _options.LastCheckStore;
         if (store is not null && _options.MinimumCheckInterval is { } interval)
@@ -148,7 +155,7 @@ public sealed class ReleaseUpdater : IDisposable
         }
 
         var isUpdateAvailable = best is not null && bestVersion is not null && bestVersion > _options.CurrentVersion;
-        if (isUpdateAvailable && store is not null)
+        if (isUpdateAvailable && store is not null && !bypassSkippedVersion)
         {
             var skippedVersion = await store.GetSkippedVersionAsync(cancellationToken).ConfigureAwait(false);
             if (skippedVersion is not null && bestVersion == skippedVersion)

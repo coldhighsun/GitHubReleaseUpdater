@@ -256,6 +256,58 @@ public class ReleaseUpdaterTests : IDisposable
     }
 
     [Fact]
+    public async Task Bypassing_the_skipped_version_still_reports_the_update_and_records_the_check_time()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        await store.SetSkippedVersionAsync("2.0.0");
+        var options = Options("1.0.0", lastCheckStore: store);
+        using var updater = new ReleaseUpdater(options, client);
+
+        var result = await updater.CheckForUpdateAsync(bypassSkippedVersion: true);
+
+        Assert.True(result.IsUpdateAvailable);
+        Assert.NotNull(result.Update);
+        Assert.NotNull(await store.GetLastCheckedAtAsync());
+    }
+
+    [Fact]
+    public async Task Bypassing_the_skipped_version_does_not_bypass_throttling()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        await store.SetSkippedVersionAsync("2.0.0");
+        var options = Options("1.0.0", lastCheckStore: store, minimumCheckInterval: TimeSpan.FromHours(24));
+        using var updater = new ReleaseUpdater(options, client);
+
+        var first = await updater.CheckForUpdateAsync();
+        Assert.False(first.Throttled);
+
+        var second = await updater.CheckForUpdateAsync(bypassSkippedVersion: true);
+
+        Assert.True(second.Throttled);
+        Assert.False(second.IsUpdateAvailable);
+    }
+
+    [Fact]
+    public async Task Clearing_the_skipped_version_lets_it_surface_again()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        ILastCheckStore store = new InMemoryLastCheckStore();
+        await store.SetSkippedVersionAsync("2.0.0");
+        var options = Options("1.0.0", lastCheckStore: store);
+        using var updater = new ReleaseUpdater(options, client);
+
+        await store.ClearSkippedVersionAsync();
+
+        Assert.Null(await store.GetSkippedVersionAsync());
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.True(result.IsUpdateAvailable);
+    }
+
+    [Fact]
     public async Task Facade_end_to_end_over_http_stub()
     {
         var payload = Encoding.ASCII.GetBytes("test");

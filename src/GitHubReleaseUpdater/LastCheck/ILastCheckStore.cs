@@ -31,6 +31,12 @@ public interface ILastCheckStore
     /// (null clears it). The version still appears in <see cref="UpdateCheckResult.LatestVersion"/>.
     /// </summary>
     Task SetSkippedVersionAsync(SemanticVersion? version, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Clears any previously recorded skipped version. Equivalent to <c>SetSkippedVersionAsync(null, cancellationToken)</c>.
+    /// </summary>
+    Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default)
+        => SetSkippedVersionAsync(null, cancellationToken);
 }
 
 /// <summary>

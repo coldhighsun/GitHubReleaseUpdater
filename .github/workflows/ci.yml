@@ -55,7 +55,7 @@ jobs:
     environment: nuget.org
     permissions:
       id-token: write
-      contents: read
+      contents: write
 
     steps:
     - name: Download package artifact
@@ -74,3 +74,8 @@ jobs:
         user: ${{ secrets.NUGET_USER }}
     - name: Push to NuGet.org
       run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+    - name: Create GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: gh release create "${{ github.ref_name }}" ./artifacts/*.nupkg --title "GitHubReleaseUpdater ${{ github.ref_name }}" --generate-notes
