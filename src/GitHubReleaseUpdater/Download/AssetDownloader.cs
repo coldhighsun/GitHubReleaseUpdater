@@ -73,7 +73,7 @@ public sealed class AssetDownloader
             await using (var source = await _client.OpenAssetStreamAsync(asset, cancellationToken).ConfigureAwait(false))
             await using (var target = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
-                var total = source.ContentLength ?? (asset.Size > 0 ? asset.Size : (long?)null);
+                var total = source.ContentLength ?? (asset.Size > 0 ? asset.Size : null);
                 await CopyWithProgressAsync(source.Stream, target, total, progress, cancellationToken).ConfigureAwait(false);
                 await target.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
