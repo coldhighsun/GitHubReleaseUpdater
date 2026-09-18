@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using GitHubReleaseUpdater.Assets;
 using GitHubReleaseUpdater.Exceptions;
+using GitHubReleaseUpdater.LastCheck;
 using GitHubReleaseUpdater.Verification;
 
 namespace GitHubReleaseUpdater.Tests;
@@ -26,7 +27,7 @@ public class ReleaseUpdaterTests : IDisposable
     /// <summary>
     /// Builds test <see cref="UpdaterOptions"/> for a fixed owner/repo and Windows x64 runtime.
     /// </summary>
-    private static UpdaterOptions Options(string current, bool prerelease = false, IChecksumProvider? checksums = null, bool require = false) => new()
+    private static UpdaterOptions Options(string current, bool prerelease = false, IChecksumProvider? checksums = null, bool require = false, ILastCheckStore? lastCheckStore = null, TimeSpan? minimumCheckInterval = null) => new()
     {
         Owner = "o",
         Repo = "r",
@@ -35,6 +36,8 @@ public class ReleaseUpdaterTests : IDisposable
         AssetSelector = new RuntimeAssetSelector(Win64),
         ChecksumProvider = checksums,
         RequireChecksum = require,
+        LastCheckStore = lastCheckStore,
+        MinimumCheckInterval = minimumCheckInterval,
     };
 
     [Fact]
@@ -170,6 +173,86 @@ public class ReleaseUpdaterTests : IDisposable
 
         var ex = await Assert.ThrowsAsync<AssetNotFoundException>(() => updater.DownloadAsync(check, _dir));
         Assert.Equal(["app-linux-x64.tar.gz"], ex.AvailableAssets);
+    }
+
+    [Fact]
+    public async Task Update_is_null_when_no_update_available()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        using var updater = new ReleaseUpdater(Options("2.0.0"), client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.IsUpdateAvailable);
+        Assert.Null(result.Update);
+        Assert.Equal("2.0.0", result.LatestVersion!.ToString());
+        Assert.NotNull(result.Release);
+    }
+
+    [Fact]
+    public async Task Update_is_non_null_with_non_null_members_when_available()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        using var updater = new ReleaseUpdater(Options("1.0.0"), client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.True(result.IsUpdateAvailable);
+        Assert.NotNull(result.Update);
+        Assert.Equal("2.0.0", result.Update!.Version.ToString());
+        Assert.Same(result.Release, result.Update.Release);
+        Assert.Equal("app-win-x64.zip", result.Update.SelectedAsset?.Name);
+    }
+
+    [Fact]
+    public async Task Second_check_within_minimum_interval_is_throttled_and_skips_the_api_call()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        var options = Options("1.0.0", lastCheckStore: store, minimumCheckInterval: TimeSpan.FromHours(24));
+        using var updater = new ReleaseUpdater(options, client);
+
+        var first = await updater.CheckForUpdateAsync();
+        Assert.True(first.IsUpdateAvailable);
+        Assert.False(first.Throttled);
+
+        client.Latest = TestData.Release("v3.0.0", "app-win-x64.zip");
+        var second = await updater.CheckForUpdateAsync();
+
+        Assert.True(second.Throttled);
+        Assert.False(second.IsUpdateAvailable);
+        Assert.Null(second.LatestVersion);
+    }
+
+    [Fact]
+    public async Task Check_after_interval_elapses_hits_the_api_again()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow - TimeSpan.FromDays(2));
+        var options = Options("1.0.0", lastCheckStore: store, minimumCheckInterval: TimeSpan.FromHours(24));
+        using var updater = new ReleaseUpdater(options, client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Throttled);
+        Assert.True(result.IsUpdateAvailable);
+    }
+
+    [Fact]
+    public async Task Skipped_version_suppresses_update_but_still_reports_latest_version()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        await store.SetSkippedVersionAsync("2.0.0");
+        var options = Options("1.0.0", lastCheckStore: store);
+        using var updater = new ReleaseUpdater(options, client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.IsUpdateAvailable);
+        Assert.Null(result.Update);
+        Assert.Equal("2.0.0", result.LatestVersion!.ToString());
     }
 
     [Fact]

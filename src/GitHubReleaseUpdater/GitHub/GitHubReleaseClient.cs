@@ -43,9 +43,18 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     private readonly HttpClient _http;
 
     /// <summary>
-    /// True when this instance created <see cref="_http"/> and is responsible for disposing it.
+    /// Process-wide <see cref="HttpClient"/> shared by every <see cref="GitHubReleaseClient"/> created without
+    /// an explicit <c>httpClient</c> argument, so that constructing many clients (or many <see cref="ReleaseUpdater"/>
+    /// instances) never creates more than one connection pool. All per-request state (Accept, User-Agent,
+    /// Authorization) is set on the <see cref="HttpRequestMessage"/> rather than on this client, so sharing it
+    /// across instances with different tokens/base URLs is safe.
     /// </summary>
-    private readonly bool _ownsHttpClient;
+    private static readonly Lazy<HttpClient> SharedHttpClient = new(() => new HttpClient(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = true,
+        AutomaticDecompression = DecompressionMethods.All,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    }));
 
     /// <summary>
     /// Optional bearer token sent with every request.
@@ -63,26 +72,24 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     /// <param name="baseUrl">API base, e.g. <c>https://api.github.com/</c> or <c>https://ghe.example.com/api/v3/</c>. Null uses github.com.</param>
     /// <param name="token">Optional personal access / fine-grained / app token.</param>
     /// <param name="userAgent">User-Agent header (GitHub rejects requests without one).</param>
-    /// <param name="httpClient">Optional shared <see cref="HttpClient"/>; when omitted one is created and owned by this instance.</param>
+    /// <param name="httpClient">
+    /// Optional <see cref="HttpClient"/> to use instead of the library's <see cref="SharedHttpClient"/> (e.g. to
+    /// supply one from <c>IHttpClientFactory</c> or a test handler). This instance never disposes it.
+    /// </param>
     public GitHubReleaseClient(Uri? baseUrl = null, string? token = null, string? userAgent = null, HttpClient? httpClient = null)
     {
         _baseUrl = NormalizeBaseUrl(baseUrl ?? DefaultBaseUrl);
         _token = string.IsNullOrWhiteSpace(token) ? null : token.Trim();
         _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "GitHubReleaseUpdater" : userAgent;
-        _ownsHttpClient = httpClient is null;
-        _http = httpClient ?? new HttpClient(new SocketsHttpHandler
-        {
-            AllowAutoRedirect = true,
-            AutomaticDecompression = DecompressionMethods.All,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        });
+        _http = httpClient ?? SharedHttpClient.Value;
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// No-op: this instance never owns <see cref="_http"/> — a caller-supplied client is the caller's to
+    /// dispose, and the default <see cref="SharedHttpClient"/> is process-wide and outlives any one instance.
+    /// </summary>
     public void Dispose()
     {
-        if (_ownsHttpClient)
-            _http.Dispose();
     }
 
     /// <inheritdoc />
