@@ -240,6 +240,25 @@ public class ReleaseUpdaterTests : IDisposable
     }
 
     [Fact]
+    public async Task BypassThrottle_hits_the_api_even_within_the_minimum_interval()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        var options = Options("1.0.0", lastCheckStore: store, minimumCheckInterval: TimeSpan.FromHours(24));
+        using var updater = new ReleaseUpdater(options, client);
+
+        var first = await updater.CheckForUpdateAsync();
+        Assert.False(first.Throttled);
+
+        client.Latest = TestData.Release("v3.0.0", "app-win-x64.zip");
+        var second = await updater.CheckForUpdateAsync(bypassThrottle: true);
+
+        Assert.False(second.Throttled);
+        Assert.True(second.IsUpdateAvailable);
+        Assert.Equal("3.0.0", second.LatestVersion?.ToString());
+    }
+
+    [Fact]
     public async Task Skipped_version_suppresses_update_but_still_reports_latest_version()
     {
         var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
