@@ -7,6 +7,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
+	<UseArtifactsOutput>true</UseArtifactsOutput>
   </PropertyGroup>
 
   <Import Project="Directory.Build.user" Condition="Exists('Directory.Build.user')" />
