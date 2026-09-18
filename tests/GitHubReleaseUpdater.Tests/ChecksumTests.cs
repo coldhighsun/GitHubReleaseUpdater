@@ -90,4 +90,11 @@ public class ChecksumTests
     [Fact]
     public void StaticChecksumProvider_rejects_invalid()
         => Assert.Throws<ArgumentException>(() => new StaticChecksumProvider("nope"));
+
+    [Fact]
+    public void FindFor_returns_null_when_multiple_entries_and_file_not_present()
+    {
+        var sums = ChecksumParser.ParseSums(HashA + "  a.zip\n" + new string('1', 64) + "  b.zip\n");
+        Assert.Null(ChecksumParser.FindFor(sums, "missing.zip"));
+    }
 }

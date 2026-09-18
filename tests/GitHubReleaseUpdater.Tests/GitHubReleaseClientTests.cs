@@ -133,4 +133,134 @@ public class GitHubReleaseClientTests
         Assert.NotNull(release);
         Assert.Equal("https://ghe.example.com/api/v3/repos/o/r/releases/latest", handler.Requests[0].RequestUri!.ToString());
     }
+
+    [Theory]
+    [InlineData("", "r")]
+    [InlineData(" ", "r")]
+    [InlineData("o", "")]
+    [InlineData("o", " ")]
+    public async Task GetLatest_rejects_blank_owner_or_repo(string owner, string repo)
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentException>(() => client.GetLatestReleaseAsync(owner, repo));
+    }
+
+    [Theory]
+    [InlineData(null, "r")]
+    [InlineData("o", null)]
+    public async Task GetLatest_rejects_null_owner_or_repo(string? owner, string? repo)
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentNullException>(() => client.GetLatestReleaseAsync(owner!, repo!));
+    }
+
+    [Fact]
+    public async Task GetReleaseByTag_rejects_blank_tag()
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentException>(() => client.GetReleaseByTagAsync("o", "r", " "));
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(101, 1)]
+    [InlineData(1, 0)]
+    public async Task ListReleases_rejects_out_of_range_paging(int perPage, int page)
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.ListReleasesAsync("o", "r", perPage, page));
+    }
+
+    [Fact]
+    public void Constructor_rejects_relative_base_url()
+        => Assert.Throws<ArgumentException>(() => new GitHubReleaseUpdater.GitHub.GitHubReleaseClient(new Uri("relative", UriKind.Relative)));
+
+    [Fact]
+    public async Task OpenAssetStream_rejects_null_asset()
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentNullException>(() => client.OpenAssetStreamAsync(null!));
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_rejects_asset_without_download_url()
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        var asset = new GitHubReleaseUpdater.GitHub.Models.GitHubAsset { Name = "a.zip" };
+        await Assert.ThrowsAsync<ArgumentException>(() => client.OpenAssetStreamAsync(asset));
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_falls_back_to_browser_url_when_no_api_url()
+    {
+        var handler = new StubHttpHandler().OnBytes("/o/r/releases/download/v1/a.zip", [9]);
+        using var client = TestData.Client(handler);
+        var asset = new GitHubReleaseUpdater.GitHub.Models.GitHubAsset { Name = "a.zip", BrowserDownloadUrl = "https://github.com/o/r/releases/download/v1/a.zip" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        Assert.Equal(1, stream.ContentLength);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_404_throws_not_found_message()
+    {
+        var handler = new StubHttpHandler();
+        using var client = TestData.Client(handler);
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.OpenAssetStreamAsync(asset));
+
+        Assert.Equal(HttpStatusCode.NotFound, ex.StatusCode);
+        Assert.Contains("not found", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReadAssetText_rejects_null_asset()
+    {
+        using var client = TestData.Client(new StubHttpHandler());
+        await Assert.ThrowsAsync<ArgumentNullException>(() => client.ReadAssetTextAsync(null!));
+    }
+
+    [Fact]
+    public async Task Forbidden_without_rate_limit_headers_throws_forbidden_message()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.Forbidden, "{\"message\":\"blocked\"}");
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.False(ex.IsRateLimited);
+        Assert.Equal(HttpStatusCode.Forbidden, ex.StatusCode);
+        Assert.Contains("forbidden", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("blocked", ex.Message);
+    }
+
+    [Fact]
+    public async Task Server_error_throws_generic_message_with_status_code()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.InternalServerError, "{\"message\":\"boom\"}");
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+        Assert.Contains("500", ex.Message);
+        Assert.Contains("boom", ex.Message);
+    }
+
+    [Fact]
+    public async Task Rate_limit_via_retry_after_header_when_reset_header_missing()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.TooManyRequests, "{\"message\":\"secondary rate limit\"}", configure: r =>
+        {
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(30));
+        });
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.True(ex.IsRateLimited);
+        Assert.NotNull(ex.RateLimitResetAt);
+    }
 }

@@ -91,4 +91,15 @@ public class AssetSelectorTests
         Assert.Equal("b.zip", new DelegateAssetSelector(a => a.Name.StartsWith('b')).Select(release)?.Name);
         Assert.Equal("a.zip", new DelegateAssetSelector(r => r.Assets[0]).Select(release)?.Name);
     }
+
+    [Fact]
+    public void RuntimeInfo_rid_combines_os_and_arch()
+        => Assert.Equal("win-x64", new RuntimeInfo("win", "x64").Rid);
+
+    [Fact]
+    public void RuntimeInfo_current_detects_a_known_os_and_arch()
+    {
+        Assert.Contains(RuntimeInfo.Current.Os, new[] { "win", "osx", "linux", "freebsd", "unknown" });
+        Assert.False(string.IsNullOrEmpty(RuntimeInfo.Current.Arch));
+    }
 }
