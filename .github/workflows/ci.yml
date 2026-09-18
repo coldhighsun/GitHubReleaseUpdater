@@ -31,7 +31,13 @@ jobs:
     - name: Build
       run: dotnet build --no-restore -c Release
     - name: Test
-      run: dotnet test --no-build --verbosity normal -c Release
+      run: dotnet test --no-build --verbosity normal -c Release --report-trx --coverage --coverage-output-format cobertura --results-directory ./coverage
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        directory: ./coverage
+        token: ${{ secrets.CODECOV_TOKEN }}
+        fail_ci_if_error: false
     - name: Pack
       run: dotnet pack src/GitHubReleaseUpdater/GitHubReleaseUpdater.csproj --no-build -c Release -o ./artifacts
     - name: Upload package artifact

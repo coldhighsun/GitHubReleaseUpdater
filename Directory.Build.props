@@ -11,5 +11,10 @@
     <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+    <OutputType>Exe</OutputType>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+
   <Import Project="Directory.Build.user" Condition="Exists('Directory.Build.user')" />
 </Project>
