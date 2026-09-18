@@ -96,7 +96,7 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
         }
 
         // Windows heuristics: prefer installers/archives over bare exe when nothing else distinguishes them.
-        if (_runtime.Os == "win" && (lower.EndsWith(".msi", StringComparison.Ordinal) || lower.EndsWith(".zip", StringComparison.Ordinal))) score += 1;
+        if (_runtime.Os.Equals("win", StringComparison.OrdinalIgnoreCase) && (lower.EndsWith(".msi", StringComparison.Ordinal) || lower.EndsWith(".zip", StringComparison.Ordinal))) score += 1;
         return score;
     }
 
@@ -115,7 +115,9 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
     }
 
     /// <summary>
-    /// True for checksum, signature and similar sidecar files.
+    /// True for checksum, signature and similar sidecar files. Matches only known metadata extensions and
+    /// aggregate sums file names/suffixes (mirroring <see cref="Verification.ReleaseChecksumProvider.IsAggregate"/>),
+    /// not an arbitrary substring, so a real asset whose name happens to contain a word like "checksums" is not excluded.
     /// </summary>
     public static bool IsMetadataFile(string name)
     {
@@ -128,10 +130,22 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
             || lower.EndsWith(".asc", StringComparison.Ordinal)
             || lower.EndsWith(".pem", StringComparison.Ordinal)
             || lower.EndsWith(".sbom", StringComparison.Ordinal)
-            || lower.EndsWith(".txt", StringComparison.Ordinal)
-            || lower.Contains("sha256sums", StringComparison.Ordinal)
-            || lower.Contains("checksums", StringComparison.Ordinal)
-            || lower.Contains("sha512sums", StringComparison.Ordinal);
+            || IsAggregateSumsFileName(lower);
+    }
+
+    /// <summary>
+    /// True when the (already lowercased) name is an exact known aggregate sums file name, or ends with one of
+    /// their common suffixed forms (e.g. <c>myapp_1.2.3_checksums.txt</c>).
+    /// </summary>
+    private static bool IsAggregateSumsFileName(string lower)
+    {
+        if (lower is "sha256sums" or "sha256sums.txt" or "sha256sum.txt" or "sha256sum" or "checksums.txt" or "checksums" or "checksums.sha256" or "sha256.txt" or "sha512sums" or "sha512sums.txt")
+            return true;
+        return lower.EndsWith("checksums.txt", StringComparison.Ordinal)
+            || lower.EndsWith("sha256sums.txt", StringComparison.Ordinal)
+            || lower.EndsWith("sha256sums", StringComparison.Ordinal)
+            || lower.EndsWith("sha512sums.txt", StringComparison.Ordinal)
+            || lower.EndsWith("sha512sums", StringComparison.Ordinal);
     }
 
     /// <summary>

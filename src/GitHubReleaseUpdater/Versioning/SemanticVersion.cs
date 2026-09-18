@@ -115,7 +115,9 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
     private static bool TryParseNumeric(ReadOnlySpan<char> piece, out int value)
     {
         value = 0;
-        if (piece.IsEmpty || piece.Length > 9) return false;
+        // 10 digits is the longest an Int32 value can be (max 2147483647); int.TryParse below still
+        // rejects anything that actually overflows.
+        if (piece.IsEmpty || piece.Length > 10) return false;
         if (piece.Length > 1 && piece[0] == '0') return false;
         foreach (var c in piece)
         {
