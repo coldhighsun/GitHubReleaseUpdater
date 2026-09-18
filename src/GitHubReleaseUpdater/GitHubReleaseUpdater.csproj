@@ -16,8 +16,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="GitHubReleaseUpdater.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="All" />
   </ItemGroup>
 
 </Project>
