@@ -104,11 +104,18 @@ public sealed class ReleaseUpdater : IDisposable
     /// time via <see cref="LastCheck.ILastCheckStore.SetLastCheckedAtAsync"/> still happen as usual. Useful for a
     /// user-initiated "check now" that should still surface a version the user previously dismissed.
     /// </param>
+    /// <param name="bypassThrottle">
+    /// When true, skips the <see cref="UpdaterOptions.MinimumCheckInterval"/> throttling check for this call, so
+    /// it always hits the API instead of possibly returning <see cref="UpdateCheckResult.ThrottledResult"/>. The
+    /// check time is still recorded via <see cref="LastCheck.ILastCheckStore.SetLastCheckedAtAsync"/> as usual.
+    /// Useful for a user-initiated "check now" against the same <see cref="ReleaseUpdater"/> instance used for
+    /// throttled automatic checks.
+    /// </param>
     /// <param name="cancellationToken"></param>
-    public async Task<UpdateCheckResult> CheckForUpdateAsync(bool bypassSkippedVersion = false, CancellationToken cancellationToken = default)
+    public async Task<UpdateCheckResult> CheckForUpdateAsync(bool bypassSkippedVersion = false, bool bypassThrottle = false, CancellationToken cancellationToken = default)
     {
         var store = _options.LastCheckStore;
-        if (store is not null && _options.MinimumCheckInterval is { } interval)
+        if (store is not null && !bypassThrottle && _options.MinimumCheckInterval is { } interval)
         {
             var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
             if (lastChecked is not null && DateTimeOffset.UtcNow - lastChecked.Value < interval)

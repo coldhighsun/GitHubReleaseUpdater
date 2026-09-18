@@ -27,16 +27,16 @@ public interface ILastCheckStore
     Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Records a version to suppress from future <see cref="UpdateCheckResult.IsUpdateAvailable"/> results
-    /// (null clears it). The version still appears in <see cref="UpdateCheckResult.LatestVersion"/>.
+    /// Records a version to suppress from future <see cref="UpdateCheckResult.IsUpdateAvailable"/> results.
+    /// The version still appears in <see cref="UpdateCheckResult.LatestVersion"/>. Use
+    /// <see cref="ClearSkippedVersionAsync"/> to undo this.
     /// </summary>
-    Task SetSkippedVersionAsync(SemanticVersion? version, CancellationToken cancellationToken = default);
+    Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Clears any previously recorded skipped version. Equivalent to <c>SetSkippedVersionAsync(null, cancellationToken)</c>.
+    /// Clears any previously recorded skipped version.
     /// </summary>
-    Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default)
-        => SetSkippedVersionAsync(null, cancellationToken);
+    Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -65,9 +65,17 @@ public sealed class InMemoryLastCheckStore : ILastCheckStore
     }
 
     /// <inheritdoc />
-    public Task SetSkippedVersionAsync(SemanticVersion? version, CancellationToken cancellationToken = default)
+    public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(version);
         _skippedVersion = version;
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default)
+    {
+        _skippedVersion = null;
         return Task.CompletedTask;
     }
 }
