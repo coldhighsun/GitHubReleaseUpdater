@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using GitHubReleaseUpdater.Assets;
@@ -68,6 +69,43 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.False(result.IsUpdateAvailable);
         Assert.Null(result.SelectedAsset);
         await Assert.ThrowsAsync<InvalidOperationException>(() => updater.DownloadAsync(result, _dir));
+    }
+
+    [Fact]
+    public async Task Api_failure_is_captured_in_result_instead_of_thrown()
+    {
+        var error = new GitHubApiException("rate limited", HttpStatusCode.TooManyRequests, isRateLimited: true, rateLimitResetAt: null, responseBody: string.Empty);
+        var client = new FakeReleaseClient { ThrowOnFetch = error };
+        using var updater = new ReleaseUpdater(Options("1.0.0"), client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Success);
+        Assert.Same(error, result.Error);
+        Assert.False(result.IsUpdateAvailable);
+        Assert.Null(result.LatestVersion);
+    }
+
+    [Fact]
+    public async Task LastCheckStore_failure_is_captured_in_result_instead_of_thrown()
+    {
+        var error = new InvalidOperationException("storage unavailable");
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        using var updater = new ReleaseUpdater(Options("1.0.0", lastCheckStore: new ThrowingLastCheckStore(error)), client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Success);
+        Assert.Same(error, result.Error);
+    }
+
+    [Fact]
+    public async Task Cancellation_still_throws_instead_of_being_captured()
+    {
+        var client = new FakeReleaseClient { ThrowOnFetch = new OperationCanceledException() };
+        using var updater = new ReleaseUpdater(Options("1.0.0"), client);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => updater.CheckForUpdateAsync());
     }
 
     [Fact]

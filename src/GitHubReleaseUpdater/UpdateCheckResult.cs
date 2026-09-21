@@ -56,6 +56,13 @@ public sealed class UpdateCheckResult
         Throttled = throttled;
     }
 
+    private UpdateCheckResult(SemanticVersion current, Exception error)
+    {
+        CurrentVersion = current;
+        SkippedTags = [];
+        Error = error;
+    }
+
     /// <summary>
     /// The version the caller is running.
     /// </summary>
@@ -111,9 +118,28 @@ public sealed class UpdateCheckResult
     public AvailableUpdate? Update { get; }
 
     /// <summary>
+    /// True when the check completed without an exception. When false, <see cref="Error"/> is non-null and all
+    /// other members reflect an empty/default state (no update found, no skipped tags) rather than any real
+    /// observation of the repository — check this before relying on <see cref="IsUpdateAvailable"/> or <see cref="LatestVersion"/>.
+    /// </summary>
+    public bool Success => Error is null;
+
+    /// <summary>
+    /// The exception caught while checking for an update, or null when <see cref="Success"/> is true. Populated
+    /// instead of throwing so callers do not need to wrap <see cref="ReleaseUpdater.CheckForUpdateAsync"/> in a
+    /// try/catch; a caller-requested cancellation still throws <see cref="OperationCanceledException"/> as usual.
+    /// </summary>
+    public Exception? Error { get; }
+
+    /// <summary>
     /// Builds a result reporting that no check was performed because it was too soon since the last one.
     /// </summary>
     internal static UpdateCheckResult ThrottledResult(SemanticVersion current) => new(current, throttled: true);
+
+    /// <summary>
+    /// Builds a result reporting that the check failed with <paramref name="error"/>.
+    /// </summary>
+    internal static UpdateCheckResult Failed(SemanticVersion current, Exception error) => new(current, error);
 }
 
 /// <summary>

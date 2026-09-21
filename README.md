@@ -37,6 +37,13 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 });
 
 var check = await updater.CheckForUpdateAsync();
+if (!check.Success)
+{
+    // CheckForUpdateAsync never throws (except OperationCanceledException) — inspect check.Error instead.
+    Console.WriteLine($"Check failed: {check.Error}");
+    return;
+}
+
 if (check.IsUpdateAvailable)
 {
     // check.Update is guaranteed non-null here, with non-null Version/Release — no defensive null checks needed.
@@ -55,7 +62,7 @@ if (check.IsUpdateAvailable)
 |---|---|
 | `ReleaseUpdater` | Facade: `CheckForUpdateAsync()` and `DownloadAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
 | `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `LastCheckStore`, `MinimumCheckInterval` are optional. |
-| `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
+| `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
 | `SemanticVersion` | Minimal SemVer 2.0 implementation. Tolerates a `v` prefix, a missing patch (`1.2`) and a custom prefix (`TagPrefix`). |
 | `IAssetSelector` | Chooses which release asset to download:<br>`RuntimeAssetSelector` (default — matches the current OS/arch: `win/linux/osx × x64/x86/arm64`, including aliases such as `amd64`, `aarch64`, `darwin`, `x86_64`)<br>`PatternAssetSelector` (wildcards plus `{os}` `{arch}` `{rid}` `{version}` `{tag}` placeholders)<br>`DelegateAssetSelector` (custom predicate) |
@@ -117,6 +124,8 @@ All derive from `UpdaterException`:
 - `GitHubApiException` — carries `StatusCode`, `IsRateLimited`, `RateLimitResetAt`.
 - `AssetNotFoundException` — carries `AvailableAssets`.
 - `ChecksumMismatchException` — carries `Expected` / `Actual`.
+
+`CheckForUpdateAsync()` never throws any of these (or any other exception) — it catches everything encountered while checking (API failures, a throwing `ILastCheckStore`, etc.) and reports it via `UpdateCheckResult.Success`/`Error` instead, so callers don't need a try/catch around it. A caller-requested cancellation still throws `OperationCanceledException` as usual. `DownloadAsync()` keeps the original throwing contract above.
 
 ### Sample CLI
 
@@ -190,6 +199,13 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 });
 
 var check = await updater.CheckForUpdateAsync();
+if (!check.Success)
+{
+    // CheckForUpdateAsync 不会抛出异常（OperationCanceledException 除外）——请检查 check.Error。
+    Console.WriteLine($"Check failed: {check.Error}");
+    return;
+}
+
 if (check.IsUpdateAvailable)
 {
     // 此时 check.Update 保证非空，且 Version/Release 也保证非空——无需再做防御性判空。
@@ -208,7 +224,7 @@ if (check.IsUpdateAvailable)
 |---|---|
 | `ReleaseUpdater` | 门面。`CheckForUpdateAsync()` 与 `DownloadAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
 | `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`LastCheckStore`、`MinimumCheckInterval` 可选。 |
-| `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
+| `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
 | `SemanticVersion` | 精简 SemVer 2.0 实现，容忍 `v` 前缀、`1.2` 缺省 patch、自定义前缀（`TagPrefix`）。 |
 | `IAssetSelector` | 从 Release 资产中选择要下载的文件：<br>`RuntimeAssetSelector`（默认，按当前 OS/架构自动匹配 `win/linux/osx × x64/x86/arm64` 及常见别名 `amd64`、`aarch64`、`darwin`、`x86_64`…）<br>`PatternAssetSelector`（通配符 + 占位符 `{os}` `{arch}` `{rid}` `{version}` `{tag}`）<br>`DelegateAssetSelector`（自定义谓词） |
@@ -270,6 +286,8 @@ if (check.Throttled)
 - `GitHubApiException` — 带 `StatusCode`、`IsRateLimited`、`RateLimitResetAt`。
 - `AssetNotFoundException` — 带 `AvailableAssets`。
 - `ChecksumMismatchException` — 带 `Expected` / `Actual`。
+
+`CheckForUpdateAsync()` 不会抛出上述任何异常（也不会抛出其他任何异常）——检查过程中遇到的所有异常（API 失败、抛异常的 `ILastCheckStore` 等）都会被捕获，并通过 `UpdateCheckResult.Success`/`Error` 返回，调用方不需要为它加 try/catch。调用方主动取消时仍会照常抛出 `OperationCanceledException`。`DownloadAsync()` 的抛异常约定保持不变，见上文。
 
 ### 示例 CLI
 

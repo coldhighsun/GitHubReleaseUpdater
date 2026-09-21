@@ -81,6 +81,12 @@ internal static class Cli
             Console.WriteLine($"Checking {owner}/{repo} (current {currentVersion}, runtime {RuntimeInfo.Current.Rid})...");
             var check = await updater.CheckForUpdateAsync(cancellationToken: cts.Token);
 
+            if (!check.Success)
+            {
+                Console.Error.WriteLine($"Check failed: {check.Error!.Message}");
+                return 1;
+            }
+
             if (check.LatestVersion is null)
             {
                 Console.WriteLine("No parseable release found.");

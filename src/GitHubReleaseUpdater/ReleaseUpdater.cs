@@ -96,7 +96,9 @@ public sealed class ReleaseUpdater : IDisposable
 
     /// <summary>
     /// Determines the newest applicable release and whether it is newer than <see cref="UpdaterOptions.CurrentVersion"/>.
-    /// Never throws for "no update"; throws <see cref="GitHubApiException"/> on API failures.
+    /// Never throws: any exception encountered while checking (API failures, storage errors, etc.) is captured in
+    /// the returned <see cref="UpdateCheckResult.Error"/> instead, so callers do not need a try/catch. A
+    /// caller-requested cancellation via <paramref name="cancellationToken"/> still throws <see cref="OperationCanceledException"/>.
     /// </summary>
     /// <param name="bypassSkippedVersion">
     /// When true, ignores any version recorded via <see cref="LastCheck.ILastCheckStore.SetSkippedVersionAsync"/>
@@ -114,69 +116,76 @@ public sealed class ReleaseUpdater : IDisposable
     /// <param name="cancellationToken"></param>
     public async Task<UpdateCheckResult> CheckForUpdateAsync(bool bypassSkippedVersion = false, bool bypassThrottle = false, CancellationToken cancellationToken = default)
     {
-        var store = _options.LastCheckStore;
-        if (store is not null && !bypassThrottle && _options.MinimumCheckInterval is { } interval)
+        try
         {
-            var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
-            if (lastChecked is not null && DateTimeOffset.UtcNow - lastChecked.Value < interval)
-                return UpdateCheckResult.ThrottledResult(_options.CurrentVersion);
-        }
-
-        var skipped = new List<string>();
-        GitHubRelease? best = null;
-        SemanticVersion? bestVersion = null;
-
-        if (_options.IncludePrerelease)
-        {
-            var releases = await _client.ListReleasesAsync(_options.Owner, _options.Repo, _options.ReleaseScanCount, 1, cancellationToken).ConfigureAwait(false);
-            foreach (var r in releases)
+            var store = _options.LastCheckStore;
+            if (store is not null && !bypassThrottle && _options.MinimumCheckInterval is { } interval)
             {
-                if (r.Draft) continue;
-                if (!SemanticVersion.TryParse(r.TagName, out var v, _options.TagPrefix))
+                var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
+                if (lastChecked is not null && DateTimeOffset.UtcNow - lastChecked.Value < interval)
+                    return UpdateCheckResult.ThrottledResult(_options.CurrentVersion);
+            }
+
+            var skipped = new List<string>();
+            GitHubRelease? best = null;
+            SemanticVersion? bestVersion = null;
+
+            if (_options.IncludePrerelease)
+            {
+                var releases = await _client.ListReleasesAsync(_options.Owner, _options.Repo, _options.ReleaseScanCount, 1, cancellationToken).ConfigureAwait(false);
+                foreach (var r in releases)
                 {
-                    skipped.Add(r.TagName);
-                    continue;
-                }
-                if (bestVersion is null || v > bestVersion)
-                {
-                    best = r;
-                    bestVersion = v;
+                    if (r.Draft) continue;
+                    if (!SemanticVersion.TryParse(r.TagName, out var v, _options.TagPrefix))
+                    {
+                        skipped.Add(r.TagName);
+                        continue;
+                    }
+                    if (bestVersion is null || v > bestVersion)
+                    {
+                        best = r;
+                        bestVersion = v;
+                    }
                 }
             }
-        }
-        else
-        {
-            var latest = await _client.GetLatestReleaseAsync(_options.Owner, _options.Repo, cancellationToken).ConfigureAwait(false);
-            if (latest is not null)
+            else
             {
-                if (SemanticVersion.TryParse(latest.TagName, out var v, _options.TagPrefix))
+                var latest = await _client.GetLatestReleaseAsync(_options.Owner, _options.Repo, cancellationToken).ConfigureAwait(false);
+                if (latest is not null)
                 {
-                    best = latest;
-                    bestVersion = v;
-                }
-                else
-                {
-                    skipped.Add(latest.TagName);
+                    if (SemanticVersion.TryParse(latest.TagName, out var v, _options.TagPrefix))
+                    {
+                        best = latest;
+                        bestVersion = v;
+                    }
+                    else
+                    {
+                        skipped.Add(latest.TagName);
+                    }
                 }
             }
-        }
 
-        var isUpdateAvailable = best is not null && bestVersion is not null && bestVersion > _options.CurrentVersion;
-        if (isUpdateAvailable && store is not null && !bypassSkippedVersion)
+            var isUpdateAvailable = best is not null && bestVersion is not null && bestVersion > _options.CurrentVersion;
+            if (isUpdateAvailable && store is not null && !bypassSkippedVersion)
+            {
+                var skippedVersion = await store.GetSkippedVersionAsync(cancellationToken).ConfigureAwait(false);
+                if (skippedVersion is not null && bestVersion == skippedVersion)
+                    isUpdateAvailable = false;
+            }
+
+            GitHubAsset? asset = null;
+            if (isUpdateAvailable)
+                asset = _selector.Select(best!);
+
+            if (store is not null)
+                await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+
+            return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            var skippedVersion = await store.GetSkippedVersionAsync(cancellationToken).ConfigureAwait(false);
-            if (skippedVersion is not null && bestVersion == skippedVersion)
-                isUpdateAvailable = false;
+            return UpdateCheckResult.Failed(_options.CurrentVersion, ex);
         }
-
-        GitHubAsset? asset = null;
-        if (isUpdateAvailable)
-            asset = _selector.Select(best!);
-
-        if (store is not null)
-            await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
-
-        return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable);
     }
 
     /// <inheritdoc />

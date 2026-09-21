@@ -2,8 +2,23 @@ using System.Net;
 using System.Text;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
+using GitHubReleaseUpdater.LastCheck;
+using GitHubReleaseUpdater.Versioning;
 
 namespace GitHubReleaseUpdater.Tests;
+
+/// <summary>
+/// <see cref="ILastCheckStore"/> whose <see cref="GetLastCheckedAtAsync"/> always throws, for exercising
+/// <see cref="ReleaseUpdater.CheckForUpdateAsync"/>'s exception capture.
+/// </summary>
+internal sealed class ThrowingLastCheckStore(Exception error) : ILastCheckStore
+{
+    public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default) => throw error;
+    public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default) => throw error;
+    public Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default) => throw error;
+    public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default) => throw error;
+    public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => throw error;
+}
 
 /// <summary>
 /// Routes requests to canned responses by URL substring.
@@ -90,10 +105,14 @@ internal sealed class FakeReleaseClient : IGitHubReleaseClient
     public Dictionary<string, byte[]> AssetBytes { get; } = new(StringComparer.OrdinalIgnoreCase);
     public bool ReportLength { get; set; } = true;
 
-    public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default) => Task.FromResult(Latest);
+    /// <summary>When set, <see cref="GetLatestReleaseAsync"/> and <see cref="ListReleasesAsync"/> throw this instead of returning.</summary>
+    public Exception? ThrowOnFetch { get; set; }
+
+    public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default)
+        => ThrowOnFetch is not null ? throw ThrowOnFetch : Task.FromResult(Latest);
 
     public Task<IReadOnlyList<GitHubRelease>> ListReleasesAsync(string owner, string repo, int perPage = 30, int page = 1, CancellationToken cancellationToken = default)
-        => Task.FromResult<IReadOnlyList<GitHubRelease>>(All.Take(perPage).ToArray());
+        => ThrowOnFetch is not null ? throw ThrowOnFetch : Task.FromResult<IReadOnlyList<GitHubRelease>>(All.Take(perPage).ToArray());
 
     public Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default)
         => Task.FromResult(All.FirstOrDefault(r => r.TagName == tag));
