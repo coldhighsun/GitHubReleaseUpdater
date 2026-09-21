@@ -87,4 +87,36 @@ public class SemanticVersionTests
         Assert.Equal(new SemanticVersion(1, 2, 3), SemanticVersion.FromVersion(new Version(1, 2, 3, 4)));
         Assert.Equal(new SemanticVersion(1, 2, 0), SemanticVersion.FromVersion(new Version(1, 2)));
     }
+
+    [Fact]
+    public void Comparison_operators_cover_not_equal_and_or_equal_cases()
+    {
+        SemanticVersion a = "1.0.0";
+        SemanticVersion b = "1.0.0";
+        SemanticVersion c = "2.0.0";
+
+        Assert.False(a != b);
+        Assert.True(a != c);
+        Assert.True(a <= b);
+        Assert.True(a >= b);
+        Assert.True(a <= c);
+        Assert.False(c <= a);
+        Assert.True(c >= a);
+        Assert.False(a >= c);
+    }
+
+    [Fact]
+    public void Equals_object_overload_handles_matching_type_and_mismatches()
+    {
+        SemanticVersion a = "1.0.0";
+        object same = (SemanticVersion)"1.0.0";
+        object different = (SemanticVersion)"2.0.0";
+
+        object unrelated = "1.0.0";
+
+        Assert.True(a.Equals(same));
+        Assert.False(a.Equals(different));
+        Assert.False(a.Equals(unrelated));
+        Assert.False(a.Equals(null));
+    }
 }

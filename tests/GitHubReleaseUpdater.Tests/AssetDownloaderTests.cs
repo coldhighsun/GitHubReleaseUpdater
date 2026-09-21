@@ -103,6 +103,19 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal("a_b_.bin", Path.GetFileName(path));
     }
 
+    [Theory]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData("   ")]
+    public async Task Rejects_asset_names_that_sanitize_to_current_or_parent_directory_or_empty(string name)
+    {
+        var client = new FakeReleaseClient();
+        client.AssetBytes[name] = [1];
+        var asset = new GitHubAsset { Name = name };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => new AssetDownloader(client).DownloadAsync(asset, _dir));
+    }
+
     /// <summary>
     /// Collects reported progress synchronously into a list for assertions.
     /// </summary>

@@ -263,4 +263,17 @@ public class GitHubReleaseClientTests
         Assert.True(ex.IsRateLimited);
         Assert.NotNull(ex.RateLimitResetAt);
     }
+
+    [Fact]
+    public async Task Error_with_non_json_body_still_throws_with_generic_message()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.InternalServerError, "not json", "text/plain");
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+        Assert.Contains("500", ex.Message);
+        Assert.Equal("not json", ex.ResponseBody);
+    }
 }
