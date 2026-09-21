@@ -67,6 +67,12 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     private readonly string _userAgent;
 
     /// <summary>
+    /// Per-request timeout applied on top of <see cref="_http"/>'s own timeout, or null to rely on the
+    /// latter alone.
+    /// </summary>
+    private readonly TimeSpan? _timeout;
+
+    /// <summary>
     /// Creates a client.
     /// </summary>
     /// <param name="baseUrl">API base, e.g. <c>https://api.github.com/</c> or <c>https://ghe.example.com/api/v3/</c>. Null uses github.com.</param>
@@ -76,12 +82,17 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     /// Optional <see cref="HttpClient"/> to use instead of the library's <see cref="SharedHttpClient"/> (e.g. to
     /// supply one from <c>IHttpClientFactory</c> or a test handler). This instance never disposes it.
     /// </param>
-    public GitHubReleaseClient(Uri? baseUrl = null, string? token = null, string? userAgent = null, HttpClient? httpClient = null)
+    /// <param name="timeout">
+    /// Optional per-request timeout. On expiry a <see cref="TimeoutException"/> is thrown instead of an
+    /// <see cref="OperationCanceledException"/> tied to the caller's cancellation token.
+    /// </param>
+    public GitHubReleaseClient(Uri? baseUrl = null, string? token = null, string? userAgent = null, HttpClient? httpClient = null, TimeSpan? timeout = null)
     {
         _baseUrl = NormalizeBaseUrl(baseUrl ?? DefaultBaseUrl);
         _token = string.IsNullOrWhiteSpace(token) ? null : token.Trim();
         _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "GitHubReleaseUpdater" : userAgent;
         _http = httpClient ?? SharedHttpClient.Value;
+        _timeout = timeout;
     }
 
     /// <summary>
@@ -127,7 +138,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     {
         ArgumentNullException.ThrowIfNull(asset);
         var request = CreateAssetRequest(asset);
-        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         try
         {
             await EnsureSuccessAsync(response, allowNotFound: false, cancellationToken).ConfigureAwait(false);
@@ -146,9 +157,31 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     {
         ArgumentNullException.ThrowIfNull(asset);
         using var request = CreateAssetRequest(asset);
-        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessAsync(response, allowNotFound: false, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a request honoring <see cref="_timeout"/> when set, translating an internally-triggered
+    /// cancellation into <see cref="TimeoutException"/> so it is distinguishable from the caller cancelling
+    /// <paramref name="cancellationToken"/>.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationToken cancellationToken)
+    {
+        if (_timeout is not { } timeout)
+            return await _http.SendAsync(request, completionOption, cancellationToken).ConfigureAwait(false);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
+        try
+        {
+            return await _http.SendAsync(request, completionOption, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"GitHub request to '{request.RequestUri}' timed out after {timeout}.");
+        }
     }
 
     /// <summary>
@@ -264,7 +297,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         ApplyCommonHeaders(request, JsonAccept);
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (allowNotFound && response.StatusCode == HttpStatusCode.NotFound)
             return null;
         await EnsureSuccessAsync(response, allowNotFound, cancellationToken).ConfigureAwait(false);

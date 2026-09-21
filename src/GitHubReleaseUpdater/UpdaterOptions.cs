@@ -73,6 +73,15 @@ public sealed class UpdaterOptions
     public required string Repo { get; init; }
 
     /// <summary>
+    /// Per-request timeout for GitHub API calls and asset downloads. Defaults to 10 seconds; set to null to
+    /// rely solely on the underlying <see cref="HttpClient"/>'s own timeout (100 seconds by default) instead.
+    /// On expiry a <see cref="TimeoutException"/> is thrown rather than an <see cref="OperationCanceledException"/>
+    /// tied to the caller's cancellation token, so it is distinguishable from caller-requested cancellation. For
+    /// asset downloads this only bounds the time to receive response headers, not the full transfer.
+    /// </summary>
+    public TimeSpan? Timeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// When true, a download with no available checksum fails instead of being reported as unverified. Default false.
     /// </summary>
     public bool RequireChecksum { get; init; }

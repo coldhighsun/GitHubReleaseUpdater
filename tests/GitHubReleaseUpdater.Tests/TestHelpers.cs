@@ -73,12 +73,27 @@ internal sealed class StubHttpHandler : HttpMessageHandler
     }
 }
 
+/// <summary>
+/// Never responds until the request is cancelled, for exercising <see cref="UpdaterOptions.Timeout"/>.
+/// </summary>
+internal sealed class DelayingHttpHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.Infinite, cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.OK);
+    }
+}
+
 internal static class TestData
 {
     public static string Read(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestData", name));
 
     public static GitHubReleaseClient Client(StubHttpHandler handler, string? token = null, Uri? baseUrl = null)
         => new(baseUrl, token, "tests", new HttpClient(handler));
+
+    public static GitHubReleaseClient Client(HttpMessageHandler handler, TimeSpan? timeout)
+        => new(null, null, "tests", new HttpClient(handler), timeout);
 
     public static GitHubRelease Release(string tag, params string[] assetNames) => new()
     {
