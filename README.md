@@ -61,7 +61,7 @@ if (check.IsUpdateAvailable)
 | Type | Purpose |
 |---|---|
 | `ReleaseUpdater` | Facade: `CheckForUpdateAsync()` and `DownloadAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `LastCheckStore`, `MinimumCheckInterval` are optional. |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval` are optional. |
 | `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
 | `SemanticVersion` | Minimal SemVer 2.0 implementation. Tolerates a `v` prefix, a missing patch (`1.2`) and a custom prefix (`TagPrefix`). |
@@ -109,6 +109,22 @@ if (check.Throttled)
 ### HttpClient reuse
 
 When `UpdaterOptions.HttpClient` is left null, every `GitHubReleaseClient`/`ReleaseUpdater` created that way shares one process-wide `HttpClient` internally — constructing a new `ReleaseUpdater` per check does not create a new connection pool each time. If you supply your own `HttpClient` (e.g. from `IHttpClientFactory`), the usual guidance applies: reuse it rather than creating one per check.
+
+### Timeout
+
+`UpdaterOptions.Timeout` bounds each individual GitHub API call and asset download; it defaults to **10 seconds**. It is layered on top of (and independent from) the underlying `HttpClient`'s own timeout — whichever is shorter wins for a given request. Set it to `null` to rely solely on the `HttpClient`'s timeout (100 seconds by default) instead.
+
+```csharp
+using var updater = new ReleaseUpdater(new UpdaterOptions
+{
+    Owner = "cli",
+    Repo = "cli",
+    CurrentVersion = "2.90.0",
+    Timeout = TimeSpan.FromSeconds(5),   // null to disable and use HttpClient.Timeout instead
+});
+```
+
+On expiry the library throws `TimeoutException` (not `OperationCanceledException`), so it can be told apart from the caller cancelling `cancellationToken`. For asset downloads this only bounds the time to receive response headers, not the full transfer.
 
 ### Download and verification
 
@@ -223,7 +239,7 @@ if (check.IsUpdateAvailable)
 | 类型 | 作用 |
 |---|---|
 | `ReleaseUpdater` | 门面。`CheckForUpdateAsync()` 与 `DownloadAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`LastCheckStore`、`MinimumCheckInterval` 可选。 |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval` 可选。 |
 | `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
 | `SemanticVersion` | 精简 SemVer 2.0 实现，容忍 `v` 前缀、`1.2` 缺省 patch、自定义前缀（`TagPrefix`）。 |
@@ -271,6 +287,22 @@ if (check.Throttled)
 ### HttpClient 复用
 
 当 `UpdaterOptions.HttpClient` 留空时，所有以这种方式创建的 `GitHubReleaseClient`/`ReleaseUpdater` 会在内部共享同一个进程级 `HttpClient`——每次检查都新建一个 `ReleaseUpdater` 不会重复创建连接池。如果你自己传入了 `HttpClient`（比如来自 `IHttpClientFactory`），则遵循通常的建议：复用它，而不是每次检查都新建一个。
+
+### 超时
+
+`UpdaterOptions.Timeout` 限制每次 GitHub API 调用与资产下载的耗时，默认 **10 秒**。它叠加在底层 `HttpClient` 自身的超时之上（两者相互独立），实际生效的是两者中较短的那个。设为 `null` 则完全依赖 `HttpClient` 自身的超时（默认 100 秒）。
+
+```csharp
+using var updater = new ReleaseUpdater(new UpdaterOptions
+{
+    Owner = "cli",
+    Repo = "cli",
+    CurrentVersion = "2.90.0",
+    Timeout = TimeSpan.FromSeconds(5),   // 设为 null 可关闭，改用 HttpClient.Timeout
+});
+```
+
+超时触发时抛出的是 `TimeoutException`（而非 `OperationCanceledException`），因此可以和调用方主动取消区分开。对于资产下载，它只限制"收到响应头"的时间，不限制整个传输过程。
 
 ### 下载与校验
 

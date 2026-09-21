@@ -276,4 +276,37 @@ public class GitHubReleaseClientTests
         Assert.Contains("500", ex.Message);
         Assert.Equal("not json", ex.ResponseBody);
     }
+
+    [Fact]
+    public async Task Timeout_throws_TimeoutException_when_request_exceeds_it()
+    {
+        using var client = TestData.Client(new DelayingHttpHandler(), timeout: TimeSpan.FromMilliseconds(50));
+
+        var ex = await Assert.ThrowsAsync<TimeoutException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.Contains("timed out", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Timeout_does_not_apply_when_null()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.OK, TestData.Read("release-latest.json"));
+        using var client = TestData.Client(handler, timeout: null);
+
+        var release = await client.GetLatestReleaseAsync("o", "r");
+
+        Assert.NotNull(release);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_throws_OperationCanceledException_not_TimeoutException()
+    {
+        using var client = TestData.Client(new DelayingHttpHandler(), timeout: TimeSpan.FromSeconds(30));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetLatestReleaseAsync("o", "r", cts.Token));
+
+        Assert.IsNotType<TimeoutException>(ex);
+    }
 }

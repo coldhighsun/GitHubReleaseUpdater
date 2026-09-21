@@ -54,7 +54,7 @@ public sealed class ReleaseUpdater : IDisposable
     /// Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.
     /// </summary>
     public ReleaseUpdater(UpdaterOptions options)
-        : this(options, new GitHubReleaseClient(options?.BaseUrl, options?.Token, options?.UserAgent, options?.HttpClient), ownsClient: true)
+        : this(options, new GitHubReleaseClient(options?.BaseUrl, options?.Token, options?.UserAgent, options?.HttpClient, options?.Timeout), ownsClient: true)
     {
     }
 
