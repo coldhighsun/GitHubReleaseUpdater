@@ -28,7 +28,15 @@ public class ReleaseUpdaterTests : IDisposable
     /// <summary>
     /// Builds test <see cref="UpdaterOptions"/> for a fixed owner/repo and Windows x64 runtime.
     /// </summary>
-    private static UpdaterOptions Options(string current, bool prerelease = false, IChecksumProvider? checksums = null, bool require = false, ILastCheckStore? lastCheckStore = null, TimeSpan? minimumCheckInterval = null) => new()
+    private static UpdaterOptions Options(
+        string current,
+        bool prerelease = false,
+        IChecksumProvider? checksums = null,
+        bool require = false,
+        ILastCheckStore? lastCheckStore = null,
+        TimeSpan? minimumCheckInterval = null,
+        int? downloadMaxRetryAttempts = null,
+        TimeSpan? downloadRetryDelay = null) => new()
     {
         Owner = "o",
         Repo = "r",
@@ -39,6 +47,8 @@ public class ReleaseUpdaterTests : IDisposable
         RequireChecksum = require,
         LastCheckStore = lastCheckStore,
         MinimumCheckInterval = minimumCheckInterval,
+        DownloadMaxRetryAttempts = downloadMaxRetryAttempts ?? 2,
+        DownloadRetryDelay = downloadRetryDelay ?? TimeSpan.FromSeconds(1),
     };
 
     [Fact]
@@ -163,6 +173,29 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.True(download.Verified);
         Assert.Equal(hash, download.Sha256);
         Assert.True(File.Exists(download.FilePath));
+    }
+
+    [Fact]
+    public async Task Download_retries_transient_failure_using_configured_options()
+    {
+        var release = TestData.Release("v2.0.0", "app-win-x64.zip");
+        var client = new FlakyAssetClient { Bytes = [1, 2, 3], FailUntilAttempt = 2 };
+        var options = Options("1.0.0", checksums: NoChecksumProvider.Instance, downloadMaxRetryAttempts: 2, downloadRetryDelay: TimeSpan.Zero);
+        using var updater = new ReleaseUpdater(options, client);
+
+        var download = await updater.DownloadAsync(release, release.Assets[0], _dir);
+
+        Assert.Equal(3, client.Attempts);
+        Assert.True(File.Exists(download.FilePath));
+    }
+
+    [Fact]
+    public void Negative_download_max_retry_attempts_is_rejected()
+    {
+        var client = new FakeReleaseClient();
+        var options = Options("1.0.0", downloadMaxRetryAttempts: -1);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
     }
 
     [Fact]

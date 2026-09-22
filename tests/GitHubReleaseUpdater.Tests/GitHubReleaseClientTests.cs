@@ -70,6 +70,39 @@ public class GitHubReleaseClientTests
     }
 
     [Fact]
+    public async Task OpenAssetStream_with_range_start_sends_range_header_and_reports_partial_content()
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", [1, 2, 3, 4, 5]);
+        using var client = TestData.Client(handler);
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.True(stream.IsPartial);
+        Assert.Equal(2, stream.RangeStart);
+        Assert.Equal(3, stream.ContentLength); // bytes remaining in this stream
+        Assert.Equal(5, stream.TotalLength); // full asset size from Content-Range
+        var buf = new byte[3];
+        Assert.Equal(3, await stream.Stream.ReadAtLeastAsync(buf, 3));
+        Assert.Equal([3, 4, 5], buf);
+        Assert.Equal(2, handler.Requests[0].Headers.Range!.Ranges.Single().From);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_without_range_start_sends_no_range_header()
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", [1, 2, 3]);
+        using var client = TestData.Client(handler);
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 0);
+
+        Assert.False(stream.IsPartial);
+        Assert.Equal(0, stream.RangeStart);
+        Assert.Null(handler.Requests[0].Headers.Range);
+    }
+
+    [Fact]
     public async Task Rate_limit_is_detected_with_reset_time()
     {
         var reset = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds();
