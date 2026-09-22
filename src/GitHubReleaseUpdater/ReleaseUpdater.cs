@@ -75,13 +75,19 @@ public sealed class ReleaseUpdater : IDisposable
         ArgumentNullException.ThrowIfNull(options.CurrentVersion);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.ReleaseScanCount, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReleaseScanCount, 100);
+        ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadMaxRetryAttempts);
 
         _options = options;
         _client = client;
         _ownsClient = ownsClient;
         _selector = options.AssetSelector ?? new RuntimeAssetSelector();
         _checksums = options.ChecksumProvider ?? new ReleaseChecksumProvider(client);
-        _downloader = new AssetDownloader(client);
+        _downloader = new AssetDownloader(client)
+        {
+            MaxRetryAttempts = options.DownloadMaxRetryAttempts,
+            RetryDelay = options.DownloadRetryDelay,
+            AllowResume = options.DownloadAllowResume,
+        };
     }
 
     /// <summary>

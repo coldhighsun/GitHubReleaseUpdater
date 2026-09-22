@@ -58,6 +58,26 @@ public sealed class UpdaterOptions
     public TimeSpan? MinimumCheckInterval { get; init; }
 
     /// <summary>
+    /// Extra attempts <see cref="ReleaseUpdater.DownloadAsync(UpdateCheckResult, string, IProgress{Download.DownloadProgress}?, CancellationToken)"/>
+    /// makes after a failed download before giving up. A transient failure (network I/O error, request timeout,
+    /// or a truncated body) is retried with exponential backoff starting at <see cref="DownloadRetryDelay"/>; a
+    /// checksum mismatch, disk error, or caller cancellation is never retried. Default 2 (3 attempts total).
+    /// </summary>
+    public int DownloadMaxRetryAttempts { get; init; } = 2;
+
+    /// <summary>
+    /// Delay before the first download retry; each subsequent retry doubles it.
+    /// </summary>
+    public TimeSpan DownloadRetryDelay { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// When true (the default), a partially downloaded file left on disk — from an earlier retry or from a
+    /// previous call that never got to clean up (e.g. the process was killed) — is resumed via an HTTP range
+    /// request instead of re-downloaded from byte 0. See <see cref="Download.AssetDownloader.AllowResume"/>.
+    /// </summary>
+    public bool DownloadAllowResume { get; init; } = true;
+
+    /// <summary>
     /// Repository owner (user or organization).
     /// </summary>
     public required string Owner { get; init; }

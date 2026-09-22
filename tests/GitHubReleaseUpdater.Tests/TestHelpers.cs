@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
@@ -49,6 +50,28 @@ internal sealed class StubHttpHandler : HttpMessageHandler
         {
             HttpContent content = includeLength ? new ByteArrayContent(body) : new StreamContentNoLength(body);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        }));
+        return this;
+    }
+
+    /// <summary>
+    /// Serves <paramref name="fullBody"/> like a range-aware server: a request carrying a <c>Range: bytes=N-</c>
+    /// header gets back <c>206 Partial Content</c> with <c>Content-Range: bytes N-{end}/{length}</c> and the tail
+    /// of the body from byte N; a request without one gets the full body as a normal <c>200 OK</c>.
+    /// </summary>
+    public StubHttpHandler OnRangeAwareBytes(string urlContains, byte[] fullBody)
+    {
+        _routes.Add((r => r.RequestUri!.ToString().Contains(urlContains, StringComparison.Ordinal), r =>
+        {
+            var rangeStart = r.Headers.Range?.Ranges.FirstOrDefault()?.From;
+            if (rangeStart is { } start && start > 0)
+            {
+                var tail = fullBody[(int)start..];
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(tail) };
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, fullBody.Length - 1, fullBody.Length);
+                return response;
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fullBody) };
         }));
         return this;
     }
@@ -140,4 +163,110 @@ internal sealed class FakeReleaseClient : IGitHubReleaseClient
 
     public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
         => Task.FromResult(Encoding.UTF8.GetString(AssetBytes[asset.Name]));
+}
+
+/// <summary>
+/// <see cref="IGitHubReleaseClient"/> whose <see cref="OpenAssetStreamAsync"/> throws <see cref="FailUntilAttempt"/>
+/// times before finally returning <see cref="Bytes"/>, for exercising <see cref="Download.AssetDownloader"/>'s retry loop.
+/// </summary>
+internal sealed class FlakyAssetClient : IGitHubReleaseClient
+{
+    /// <summary>Bytes returned once the attempt count reaches <see cref="FailUntilAttempt"/>.</summary>
+    public byte[] Bytes { get; set; } = [];
+
+    /// <summary>Number of leading attempts that throw <see cref="ExceptionFactory"/> before one succeeds.</summary>
+    public int FailUntilAttempt { get; set; }
+
+    /// <summary>Exception thrown by each failing attempt. Defaults to an <see cref="HttpRequestException"/>.</summary>
+    public Func<Exception> ExceptionFactory { get; set; } = () => new HttpRequestException("simulated transient failure");
+
+    /// <summary>Number of calls made to <see cref="OpenAssetStreamAsync"/> so far.</summary>
+    public int Attempts { get; private set; }
+
+    public Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
+    {
+        Attempts++;
+        if (Attempts <= FailUntilAttempt)
+            throw ExceptionFactory();
+        return Task.FromResult(new AssetStream(new MemoryStream(Bytes), Bytes.Length, new MemoryStream()));
+    }
+
+    public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<IReadOnlyList<GitHubRelease>> ListReleasesAsync(string owner, string repo, int perPage = 30, int page = 1, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+}
+
+/// <summary>
+/// <see cref="IGitHubReleaseClient"/> that honors range requests like a real server, for exercising
+/// <see cref="Download.AssetDownloader"/>'s resume logic end to end.
+/// </summary>
+internal sealed class ResumableAssetClient : IGitHubReleaseClient
+{
+    /// <summary>The complete asset content.</summary>
+    public byte[] FullBytes { get; set; } = [];
+
+    /// <summary>When true (the default), a non-zero <c>rangeStart</c> yields a partial stream starting there; when false, every call returns the full body from byte 0.</summary>
+    public bool HonorRange { get; set; } = true;
+
+    /// <summary>1-based attempt number that throws <see cref="HttpRequestException"/> after <see cref="FailAfterBytes"/> bytes; 0 disables failure injection.</summary>
+    public int FailAfterBytesOnAttempt { get; set; }
+
+    /// <summary>Bytes yielded on the failing attempt before it throws.</summary>
+    public int FailAfterBytes { get; set; }
+
+    /// <summary>Number of calls made to <see cref="OpenAssetStreamAsync(GitHubAsset, long, CancellationToken)"/> so far.</summary>
+    public int Attempts { get; private set; }
+
+    /// <summary><c>rangeStart</c> passed on each call, in order.</summary>
+    public List<long> RequestedRangeStarts { get; } = [];
+
+    public Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
+        => OpenAssetStreamAsync(asset, 0, cancellationToken);
+
+    public Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, long rangeStart, CancellationToken cancellationToken = default)
+    {
+        Attempts++;
+        RequestedRangeStarts.Add(rangeStart);
+        var effectiveStart = HonorRange ? rangeStart : 0;
+        var remaining = FullBytes[(int)effectiveStart..];
+        Stream stream = Attempts == FailAfterBytesOnAttempt ? new FailingAfterStream(remaining, FailAfterBytes) : new MemoryStream(remaining);
+        var isPartial = HonorRange && rangeStart > 0;
+        return Task.FromResult(new AssetStream(stream, remaining.Length, new MemoryStream(), isPartial, rangeStart, FullBytes.Length));
+    }
+
+    public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<IReadOnlyList<GitHubRelease>> ListReleasesAsync(string owner, string repo, int perPage = 30, int page = 1, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+    /// <summary>
+    /// Stream that yields <paramref name="data"/> up to <paramref name="failAfter"/> bytes, then throws
+    /// <see cref="HttpRequestException"/> as if the connection broke mid-transfer.
+    /// </summary>
+    private sealed class FailingAfterStream(byte[] data, int failAfter) : Stream
+    {
+        private int _position;
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= failAfter || _position >= data.Length)
+                throw new HttpRequestException("simulated connection reset mid-transfer");
+            var toCopy = Math.Min(buffer.Length, Math.Min(data.Length - _position, failAfter - _position));
+            data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return ValueTask.FromResult(toCopy);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

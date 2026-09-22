@@ -160,16 +160,23 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
+    public Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
+        => OpenAssetStreamAsync(asset, rangeStart: 0, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, long rangeStart, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(asset);
-        var request = CreateAssetRequest(asset);
+        ArgumentOutOfRangeException.ThrowIfNegative(rangeStart);
+        var request = CreateAssetRequest(asset, rangeStart);
         var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         try
         {
             await EnsureSuccessAsync(response, allowNotFound: false, cancellationToken).ConfigureAwait(false);
             var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            return new AssetStream(stream, response.Content.Headers.ContentLength, response);
+            var isPartial = rangeStart > 0 && response.StatusCode == HttpStatusCode.PartialContent;
+            var totalLength = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength;
+            return new AssetStream(stream, response.Content.Headers.ContentLength, response, isPartial, rangeStart, totalLength);
         }
         catch
         {
@@ -335,9 +342,10 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     }
 
     /// <summary>
-    /// Builds a GET request for an asset's download URL, preferring the API URL over the browser URL.
+    /// Builds a GET request for an asset's download URL, preferring the API URL over the browser URL, with an
+    /// optional <c>Range: bytes={rangeStart}-</c> header to resume a partial download.
     /// </summary>
-    private HttpRequestMessage CreateAssetRequest(GitHubAsset asset)
+    private HttpRequestMessage CreateAssetRequest(GitHubAsset asset, long rangeStart = 0)
     {
         // Prefer the API endpoint (works for private repos with a token); fall back to the browser URL.
         var url = !string.IsNullOrEmpty(asset.ApiUrl) ? asset.ApiUrl : asset.BrowserDownloadUrl;
@@ -345,6 +353,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
             throw new ArgumentException("Asset has no download URL.", nameof(asset));
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         ApplyCommonHeaders(request, OctetStreamAccept);
+        if (rangeStart > 0)
+            request.Headers.Range = new RangeHeaderValue(rangeStart, null);
         return request;
     }
 
