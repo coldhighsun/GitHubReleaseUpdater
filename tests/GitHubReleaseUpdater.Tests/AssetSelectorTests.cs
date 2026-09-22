@@ -44,6 +44,38 @@ public class AssetSelectorTests
     }
 
     [Fact]
+    public void Runtime_selector_still_picks_plain_txt_release_asset()
+    {
+        // A .txt file is only metadata when its name looks like a checksum/sums file (see IsMetadataFile tests below);
+        // a plain text release artifact must remain selectable.
+        var release = TestData.Release("v1", "app-win-x64.txt", "readme.txt");
+        Assert.Equal("app-win-x64.txt", new RuntimeAssetSelector(new RuntimeInfo("win", "x64")).Select(release)?.Name);
+    }
+
+    [Theory]
+    [InlineData("app.sha256", true)]
+    [InlineData("app.sha512", true)]
+    [InlineData("app.sha1", true)]
+    [InlineData("app.md5", true)]
+    [InlineData("app.sig", true)]
+    [InlineData("app.asc", true)]
+    [InlineData("app.pem", true)]
+    [InlineData("app.sbom", true)]
+    [InlineData("SHA256SUMS", true)]
+    [InlineData("sha256sums.txt", true)]
+    [InlineData("checksums.txt", true)]
+    [InlineData("myapp_1.2.3_checksums.txt", true)]
+    [InlineData("myapp-SHA256SUMS.txt", true)]
+    [InlineData("sha256sum.txt", true)]
+    [InlineData("md5sums.txt", false)]
+    [InlineData("app-win-x64.zip", false)]
+    [InlineData("readme.txt", false)]
+    [InlineData("app-notes.txt", false)]
+    [InlineData("install-instructions.TXT", false)]
+    public void IsMetadataFile_classifies_by_name(string name, bool expected)
+        => Assert.Equal(expected, RuntimeAssetSelector.IsMetadataFile(name));
+
+    [Fact]
     public void Runtime_selector_rejects_other_platform_even_when_arch_matches()
     {
         var release = TestData.Release("v1", "app-linux-x64.tar.gz");

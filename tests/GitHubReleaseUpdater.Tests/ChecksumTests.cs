@@ -29,6 +29,20 @@ public class ChecksumTests
     }
 
     [Fact]
+    public void ParseSums_bsd_format_is_parsed_directly()
+    {
+        var sums = ChecksumParser.ParseSums($"SHA256 (dist/app.zip) = {HashA}\n");
+        Assert.Equal(HashA, sums["app.zip"]);
+    }
+
+    [Fact]
+    public void FindFor_does_not_fall_back_to_bare_hash_when_multiple_entries_exist()
+    {
+        var sums = ChecksumParser.ParseSums($"{HashA}  a.zip\n{new string('1', 64)}  b.zip\n");
+        Assert.Null(ChecksumParser.FindFor(sums, "missing.zip"));
+    }
+
+    [Fact]
     public void ParseSums_ignores_non_sha256_lines()
     {
         var sums = ChecksumParser.ParseSums("d41d8cd98f00b204e9800998ecf8427e  md5file\nzz\n");
