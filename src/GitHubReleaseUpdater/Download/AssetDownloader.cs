@@ -312,6 +312,7 @@ public sealed class AssetDownloader
             var actualLength = new FileInfo(partialPath).Length;
             if (verifiedLength > actualLength)
             {
+                TryDelete(metaPath);
                 return null;
             }
 
@@ -345,6 +346,24 @@ public sealed class AssetDownloader
         try
         {
             File.WriteAllText(metaPath, $"{AssetMarker(asset)}\n{verifiedLength}:{tailHashHex}");
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>
+    /// Flushes <paramref name="target"/>, hashes its last <see cref="TailHashWindow"/> bytes, and records the
+    /// checkpoint via <see cref="WriteCheckpoint"/> — all as one best-effort unit. Unlike <see cref="WriteCheckpoint"/>
+    /// alone, this also guards the flush and the tail-hash read-back: an I/O error at either step is just as
+    /// tolerable as one during the write itself, since a failed checkpoint only costs a future resume, never the
+    /// current transfer.
+    /// </summary>
+    private static async Task TryCheckpointAsync(FileStream target, string metaPath, GitHubAsset asset, long verifiedLength, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+            WriteCheckpoint(metaPath, asset, verifiedLength, ComputeTailHash(target, verifiedLength));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -460,8 +479,7 @@ public sealed class AssetDownloader
             {
                 checkpointed = true;
                 lastCheckpoint = stopwatch.Elapsed;
-                await target.FlushAsync(cancellationToken).ConfigureAwait(false);
-                WriteCheckpoint(cp.MetaPath, cp.Asset, received, ComputeTailHash(target, received));
+                await TryCheckpointAsync(target, cp.MetaPath, cp.Asset, received, cancellationToken).ConfigureAwait(false);
             }
 
             if (stopwatch.Elapsed - lastReport >= ProgressInterval)
