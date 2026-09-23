@@ -1,3 +1,5 @@
+using System.Net;
+using System.Security.Cryptography;
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
@@ -132,6 +134,25 @@ public class AssetDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Resumes_even_when_overwrite_is_disabled()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        var asset = new GitHubAsset { Name = "a.bin", Size = full.Length };
+
+        var crashingClient = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 4 };
+        var crashingDownloader = new AssetDownloader(crashingClient) { MaxRetryAttempts = 0 };
+        await Assert.ThrowsAsync<HttpRequestException>(() => crashingDownloader.DownloadAsync(asset, _dir));
+
+        // overwrite: false protects a completed final file from being replaced; it must not also disable resuming
+        // the in-progress partial, since no completed file exists yet at this point.
+        var resumedClient = new ResumableAssetClient { FullBytes = full };
+        var path = await new AssetDownloader(resumedClient).DownloadAsync(asset, _dir, overwrite: false);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal([4], resumedClient.RequestedRangeStarts);
+    }
+
+    [Fact]
     public async Task Allow_resume_false_ignores_existing_partial_file_and_restarts_from_zero()
     {
         var full = new byte[] { 1, 2, 3, 4, 5 };
@@ -151,9 +172,12 @@ public class AssetDownloaderTests : IDisposable
     {
         var full = new byte[] { 1, 2, 3, 4, 5 };
         var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var stale = new byte[] { 9, 9 }; // leftover bytes from a run against a server that ignores ranges
         Directory.CreateDirectory(_dir);
-        await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), [9, 9]); // leftover bytes from a run against a server that ignores ranges
-        await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}"); // marks the leftover bytes as belonging to this exact asset
+        await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), stale);
+        // Marks the leftover bytes as belonging to this exact asset and verified up to their full length.
+        var tailHash = Convert.ToHexStringLower(MD5.HashData(stale));
+        await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{stale.Length}:{tailHash}");
 
         var client = new ResumableAssetClient { FullBytes = full, HonorRange = false };
         var path = await new AssetDownloader(client).DownloadAsync(asset, _dir);
@@ -272,13 +296,13 @@ public class AssetDownloaderTests : IDisposable
     }
 
     [Fact]
-    public async Task Does_not_retry_github_api_exception_even_though_it_derives_from_updater_exception()
+    public async Task Does_not_retry_non_transient_github_api_exception()
     {
         var client = new FlakyAssetClient
         {
             Bytes = [1],
             FailUntilAttempt = 1,
-            ExceptionFactory = () => new GitHubApiException("rate limited"),
+            ExceptionFactory = () => new GitHubApiException("not found", HttpStatusCode.NotFound, false, null, string.Empty),
         };
         var asset = new GitHubAsset { Name = "a.bin" };
         var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
@@ -286,6 +310,24 @@ public class AssetDownloaderTests : IDisposable
         await Assert.ThrowsAsync<GitHubApiException>(() => downloader.DownloadAsync(asset, _dir));
 
         Assert.Equal(1, client.Attempts);
+    }
+
+    [Fact]
+    public async Task Retries_transient_github_api_exception()
+    {
+        var client = new FlakyAssetClient
+        {
+            Bytes = [1, 2, 3],
+            FailUntilAttempt = 1,
+            ExceptionFactory = () => new GitHubApiException("service unavailable", HttpStatusCode.ServiceUnavailable, false, null, string.Empty),
+        };
+        var asset = new GitHubAsset { Name = "a.bin" };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
+
+        var path = await downloader.DownloadAsync(asset, _dir);
+
+        Assert.Equal(2, client.Attempts);
+        Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(path));
     }
 
     [Fact]

@@ -76,6 +76,7 @@ public sealed class ReleaseUpdater : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(options.ReleaseScanCount, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReleaseScanCount, 100);
         ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadMaxRetryAttempts);
+        ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadRetryDelay.Ticks);
 
         _options = options;
         _client = client;

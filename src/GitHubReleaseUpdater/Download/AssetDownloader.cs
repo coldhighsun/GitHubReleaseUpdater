@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
@@ -18,9 +20,43 @@ public sealed class AssetDownloader
 
     /// <summary>
     /// Suffix appended to the partial file's path for the sidecar file that records which asset (id and size) it
-    /// belongs to, so a stale partial from a different asset/release is never resumed into.
+    /// belongs to, so a stale partial from a different asset/release is never resumed into, plus a checkpoint of
+    /// how many of its bytes have actually been verified on disk.
     /// </summary>
     private const string MetaSuffix = ".meta";
+
+    /// <summary>
+    /// Number of trailing bytes hashed at each checkpoint (and re-hashed on resume) to detect a torn/corrupted
+    /// write near the last recorded checkpoint without re-hashing the entire partial file.
+    /// </summary>
+    private const int TailHashWindow = 4096;
+
+    /// <summary>
+    /// Per-partial-file locks, keyed by full path, serializing concurrent <see cref="DownloadAsync"/> calls that
+    /// target the same destination so one call's cleanup can never race another call's in-flight write to the
+    /// same <c>.partial</c>/<c>.meta</c> pair. Entries are removed once their last holder releases them (see
+    /// <see cref="RefCountedLock"/>) so this never grows unbounded across the lifetime of a long-running process
+    /// that downloads to many distinct paths.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, RefCountedLock> PathLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A <see cref="SemaphoreSlim"/> paired with a count of callers currently holding or waiting on it, so the
+    /// owning <see cref="PathLocks"/> entry can be removed exactly when it becomes unused.
+    /// </summary>
+    private sealed class RefCountedLock
+    {
+        /// <summary>
+        /// The underlying per-path lock.
+        /// </summary>
+        public readonly SemaphoreSlim Semaphore = new(1, 1);
+
+        /// <summary>
+        /// Number of <see cref="DownloadAsync"/> calls currently holding or waiting to acquire <see cref="Semaphore"/>.
+        /// Mutated only while holding the <see cref="PathLocks"/> dictionary's own lock.
+        /// </summary>
+        public int RefCount;
+    }
 
     /// <summary>
     /// The GitHub client used to open the asset stream.
@@ -39,9 +75,10 @@ public sealed class AssetDownloader
 
     /// <summary>
     /// Extra attempts made after a failed download before giving up, applied per <see cref="DownloadAsync"/> call.
-    /// A transient failure (network I/O error, request timeout, or a truncated body) is retried with exponential
-    /// backoff starting at <see cref="RetryDelay"/> and doubling each attempt; a checksum mismatch, disk error,
-    /// invalid argument, or caller cancellation is never retried. Default 2 (3 attempts total).
+    /// A transient failure (network I/O error, request timeout, a truncated body, or a GitHub 5xx/429/408 response)
+    /// is retried with exponential backoff starting at <see cref="RetryDelay"/> and doubling each attempt; a
+    /// checksum mismatch, disk error, invalid argument, or caller cancellation is never retried. Default 2 (3
+    /// attempts total).
     /// </summary>
     public int MaxRetryAttempts { get; init; } = 2;
 
@@ -54,12 +91,14 @@ public sealed class AssetDownloader
     /// <summary>
     /// When true (the default), a <c>.partial</c> file left on disk by an earlier attempt — whether from a prior
     /// retry within the same <see cref="DownloadAsync"/> call or a previous call that never got to clean up (e.g.
-    /// the process was killed) — is resumed via an HTTP range request instead of re-downloaded from byte 0. If the
-    /// underlying <see cref="IGitHubReleaseClient"/> doesn't support range requests (its
-    /// <see cref="IGitHubReleaseClient.OpenAssetStreamAsync(GitHub.Models.GitHubAsset, long, CancellationToken)"/>
+    /// the process was killed) — is resumed via an HTTP range request instead of re-downloaded from byte 0, once
+    /// its identity and the checksum of its last checkpointed bytes both match the sidecar <c>.meta</c> file
+    /// written alongside it. If the underlying <see cref="IGitHubReleaseClient"/> doesn't support range requests
+    /// (its <see cref="IGitHubReleaseClient.OpenAssetStreamAsync(GitHub.Models.GitHubAsset, long, CancellationToken)"/>
     /// returns a non-partial stream) the download transparently restarts from 0 instead. When false, every attempt
     /// starts from 0 and any failure (other than a successful completion) deletes the partial file, matching this
-    /// type's behavior before resume support was added.
+    /// type's behavior before resume support was added. This setting is independent of <c>overwrite</c>, which only
+    /// governs whether an already-completed file at the destination may be replaced.
     /// </summary>
     public bool AllowResume { get; init; } = true;
 
@@ -83,7 +122,7 @@ public sealed class AssetDownloader
     /// <param name="asset">Asset to download.</param>
     /// <param name="directory">Destination directory.</param>
     /// <param name="fileName">Optional destination file name; defaults to the asset name.</param>
-    /// <param name="overwrite">Whether to replace an existing file at the destination.</param>
+    /// <param name="overwrite">Whether to replace an existing completed file at the destination. Does not affect resume eligibility.</param>
     /// <param name="progress">Optional progress sink.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task<string> DownloadAsync(
@@ -104,112 +143,208 @@ public sealed class AssetDownloader
         var metaPath = partialPath + MetaSuffix;
 
         if (File.Exists(finalPath) && !overwrite)
-            throw new IOException($"File already exists: {finalPath}");
-
-        for (var attempt = 0; ; attempt++)
         {
-            try
-            {
-                // Only trust a pre-existing partial file when overwrite allows touching what's on disk and its
-                // sidecar .meta confirms it belongs to this exact asset (id + size) — otherwise start from 0.
-                var resumeFrom = overwrite && AllowResume && PartialMatchesAsset(partialPath, metaPath, asset)
-                    ? new FileInfo(partialPath).Length
-                    : 0;
-                await using var source = await _client.OpenAssetStreamAsync(asset, resumeFrom, cancellationToken).ConfigureAwait(false);
-                var resuming = resumeFrom > 0 && source.IsPartial;
-                var fileMode = resuming ? FileMode.Append : FileMode.Create;
-                var initialReceived = resuming ? resumeFrom : 0L;
-                var total = source.TotalLength ?? (asset.Size > 0 ? asset.Size : null);
+            throw new IOException($"File already exists: {finalPath}");
+        }
 
-                await using (var target = new FileStream(partialPath, fileMode, FileAccess.Write, FileShare.None, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        var pathKey = Path.GetFullPath(partialPath);
+        RefCountedLock pathLock;
+        lock (PathLocks)
+        {
+            pathLock = PathLocks.GetOrAdd(pathKey, static _ => new RefCountedLock());
+            pathLock.RefCount++;
+        }
+
+        var lockAcquired = false;
+        try
+        {
+            await pathLock.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            lockAcquired = true;
+
+            for (var attempt = 0; ; attempt++)
+            {
+                try
                 {
-                    // Only now that FileMode.Create has actually truncated the file (done synchronously by the
-                    // FileStream constructor above) can the marker truthfully claim this asset's identity for it.
-                    if (!resuming) WriteAssetMarker(metaPath, asset);
+                    // Resume eligibility depends only on AllowResume and the partial's verified checkpoint, never
+                    // on overwrite (which governs replacing the already-completed final file, an unrelated concern).
+                    var verifiedLength = AllowResume ? PartialMatchesAsset(partialPath, metaPath, asset) : null;
+                    var resumeFrom = verifiedLength ?? 0;
+                    await using var source = await _client.OpenAssetStreamAsync(asset, resumeFrom, cancellationToken).ConfigureAwait(false);
+                    var resuming = resumeFrom > 0 && source.IsPartial;
+                    var initialReceived = resuming ? resumeFrom : 0L;
+                    var total = source.TotalLength ?? (asset.Size > 0 ? asset.Size : null);
 
-                    await CopyWithProgressAsync(source.Stream, target, initialReceived, total, progress, cancellationToken).ConfigureAwait(false);
-                    await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    var target = resuming
+                        ? new FileStream(partialPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan)
+                        : new FileStream(partialPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                    await using (target)
+                    {
+                        if (resuming)
+                        {
+                            // Discard any bytes beyond the last verified checkpoint (e.g. a torn write from a
+                            // crash mid-flush) so only content that passed ComputeTailHash is ever built upon.
+                            target.SetLength(resumeFrom);
+                            target.Position = resumeFrom;
+                        }
+                        else
+                        {
+                            WriteAssetMarker(metaPath, asset);
+                        }
+
+                        var checkpoint = AllowResume ? (metaPath, asset) : ((string MetaPath, GitHubAsset Asset)?)null;
+                        await CopyWithProgressAsync(source.Stream, target, initialReceived, total, progress, checkpoint, cancellationToken).ConfigureAwait(false);
+                        await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // Re-check (rather than trust the pre-lock check above) so a concurrent DownloadAsync call for
+                    // the same destination — which only just released pathLock after completing — can't be
+                    // silently clobbered by this call finishing second.
+                    if (File.Exists(finalPath) && !overwrite)
+                    {
+                        throw new IOException($"File already exists: {finalPath}");
+                    }
+                    if (File.Exists(finalPath))
+                    {
+                        File.Delete(finalPath);
+                    }
+                    File.Move(partialPath, finalPath);
+                    TryDelete(metaPath);
+                    return finalPath;
                 }
-
-                if (File.Exists(finalPath)) File.Delete(finalPath);
-                File.Move(partialPath, finalPath);
-                TryDelete(metaPath);
-                return finalPath;
-            }
-            // A range that's no longer valid for this asset (e.g. it was regenerated with a smaller size between
-            // attempts) can never succeed by resuming again, so the partial is discarded unconditionally — even
-            // when AllowResume is true — so this and any later call restarts from 0 instead of failing forever.
-            catch (GitHubApiException ex) when (ex.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-            {
-                TryDelete(partialPath);
-                TryDelete(metaPath);
-                if (attempt >= MaxRetryAttempts) throw;
-                await Task.Delay(RetryDelay * Math.Pow(2, attempt), cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (attempt < MaxRetryAttempts && IsTransient(ex))
-            {
-                if (!AllowResume)
+                // A range that's no longer valid for this asset (e.g. it was regenerated with a smaller size between
+                // attempts) can never succeed by resuming again, so the partial is discarded unconditionally — even
+                // when AllowResume is true — so this and any later call restarts from 0 instead of failing forever.
+                catch (GitHubApiException ex) when (ex.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
                 {
                     TryDelete(partialPath);
                     TryDelete(metaPath);
+                    if (attempt >= MaxRetryAttempts)
+                    {
+                        throw;
+                    }
+                    await Task.Delay(ExponentialDelay(RetryDelay, attempt), cancellationToken).ConfigureAwait(false);
                 }
-                await Task.Delay(RetryDelay * Math.Pow(2, attempt), cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                TryDelete(partialPath);
-                TryDelete(metaPath);
-                throw;
-            }
-            catch
-            {
-                if (!AllowResume)
+                catch (Exception ex) when (attempt < MaxRetryAttempts && IsTransient(ex))
+                {
+                    if (!AllowResume)
+                    {
+                        TryDelete(partialPath);
+                        TryDelete(metaPath);
+                    }
+                    await Task.Delay(ExponentialDelay(RetryDelay, attempt), cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
                 {
                     TryDelete(partialPath);
                     TryDelete(metaPath);
+                    throw;
                 }
-                throw;
+                catch
+                {
+                    if (!AllowResume)
+                    {
+                        TryDelete(partialPath);
+                        TryDelete(metaPath);
+                    }
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            // Only release a semaphore this call actually acquired — e.g. cancellation while still queued in
+            // WaitAsync above must not release a lock this call never held.
+            if (lockAcquired)
+            {
+                pathLock.Semaphore.Release();
+            }
+            lock (PathLocks)
+            {
+                if (--pathLock.RefCount == 0)
+                {
+                    PathLocks.TryRemove(pathKey, out _);
+                }
             }
         }
     }
 
     /// <summary>
-    /// True when both <paramref name="partialPath"/> and its sidecar <paramref name="metaPath"/> exist and the
-    /// marker records the same asset id and size as <paramref name="asset"/>. False (and any stale sidecar/partial
-    /// deleted) for a missing partial, a missing/unreadable/mismatched marker, or an orphaned marker whose partial
-    /// file is gone.
+    /// Returns the number of verified, resumable bytes at the start of <paramref name="partialPath"/> when it and
+    /// its sidecar <paramref name="metaPath"/> exist, the marker's identity matches <paramref name="asset"/> (id
+    /// and size), and the checkpointed tail-hash of those bytes still matches what's on disk. Returns null (and
+    /// deletes any stale sidecar/partial) for a missing partial, a missing/malformed/mismatched marker, an orphaned
+    /// marker whose partial file is gone, a checkpoint whose tail bytes no longer hash to the recorded value, or an
+    /// I/O error reading either file (e.g. transiently locked by antivirus/backup software) — resume is a best-effort
+    /// optimization, so any doubt about the partial's trustworthiness falls back to a full restart rather than
+    /// letting the error abort the whole download.
     /// </summary>
-    private static bool PartialMatchesAsset(string partialPath, string metaPath, GitHubAsset asset)
+    private static long? PartialMatchesAsset(string partialPath, string metaPath, GitHubAsset asset)
     {
         if (!File.Exists(partialPath))
         {
             TryDelete(metaPath);
-            return false;
+            return null;
         }
 
-        string? stored;
+        if (!File.Exists(metaPath))
+        {
+            return null;
+        }
+
         try
         {
-            if (!File.Exists(metaPath)) return false;
-            stored = File.ReadAllText(metaPath);
+            var stored = File.ReadAllText(metaPath);
+            var lines = stored.Split('\n', 2);
+            if (lines.Length != 2 || lines[0] != AssetMarker(asset))
+            {
+                TryDelete(metaPath);
+                return null;
+            }
+
+            var parts = lines[1].Split(':', 2);
+            if (parts.Length != 2 || !long.TryParse(parts[0], out var verifiedLength) || verifiedLength < 0)
+            {
+                TryDelete(metaPath);
+                return null;
+            }
+
+            var actualLength = new FileInfo(partialPath).Length;
+            if (verifiedLength > actualLength)
+            {
+                return null;
+            }
+
+            return ComputeTailHash(partialPath, verifiedLength) == parts[1] ? verifiedLength : null;
         }
-        catch (IOException) { return false; }
-        catch (UnauthorizedAccessException) { return false; }
-
-        if (stored == AssetMarker(asset)) return true;
-
-        TryDelete(metaPath);
-        return false;
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
-    /// Writes the sidecar <c>.meta</c> file recording which asset a freshly (re)started partial download belongs to.
+    /// Writes the sidecar <c>.meta</c> file recording which asset a freshly (re)started partial download belongs
+    /// to, with an initial checkpoint of zero verified bytes.
     /// </summary>
-    private static void WriteAssetMarker(string metaPath, GitHubAsset asset)
+    private static void WriteAssetMarker(string metaPath, GitHubAsset asset) =>
+        WriteCheckpoint(metaPath, asset, 0, ComputeTailHash(ReadOnlySpan<byte>.Empty));
+
+    /// <summary>
+    /// Overwrites the sidecar <c>.meta</c> file with the asset's identity and a checkpoint recording that
+    /// <paramref name="verifiedLength"/> bytes hashing to <paramref name="tailHashHex"/> are safe to resume from.
+    /// Best-effort: an I/O error (e.g. a transient antivirus/backup lock) is silently ignored rather than aborting
+    /// the download, since a missing or stale checkpoint only costs a future resume, never the current transfer.
+    /// </summary>
+    private static void WriteCheckpoint(string metaPath, GitHubAsset asset, long verifiedLength, string tailHashHex)
     {
         try
         {
-            File.WriteAllText(metaPath, AssetMarker(asset));
+            File.WriteAllText(metaPath, $"{AssetMarker(asset)}\n{verifiedLength}:{tailHashHex}");
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -229,28 +364,90 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
+    /// Hashes the last <see cref="TailHashWindow"/> bytes (or fewer, if <paramref name="length"/> is smaller) of
+    /// <paramref name="path"/> up to <paramref name="length"/>, used before <paramref name="path"/> is opened for
+    /// writing (i.e. while validating a candidate resume).
+    /// </summary>
+    private static string ComputeTailHash(string path, long length)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var start = Math.Max(0, length - TailHashWindow);
+        var buffer = new byte[length - start];
+        stream.Position = start;
+        stream.ReadExactly(buffer);
+        return ComputeTailHash(buffer);
+    }
+
+    /// <summary>
+    /// Hashes the last <see cref="TailHashWindow"/> bytes (or fewer, if <paramref name="length"/> is smaller)
+    /// already written to <paramref name="target"/>, reading back through the same handle (which must have just
+    /// been flushed) and restoring its position to <paramref name="length"/> afterwards so writing can continue.
+    /// </summary>
+    private static string ComputeTailHash(FileStream target, long length)
+    {
+        var start = Math.Max(0, length - TailHashWindow);
+        var buffer = new byte[length - start];
+        target.Position = start;
+        target.ReadExactly(buffer);
+        target.Position = length;
+        return ComputeTailHash(buffer);
+    }
+
+    /// <summary>
+    /// Hex-encoded MD5 of <paramref name="bytes"/>. Used only to detect accidental corruption of a resumed
+    /// partial file, not as a security control.
+    /// </summary>
+    private static string ComputeTailHash(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(MD5.HashData(bytes));
+
+    /// <summary>
     /// True for exceptions worth retrying: transport-level failures (<see cref="HttpRequestException"/> and
     /// <see cref="System.Net.Http.HttpIOException"/>, the latter thrown when the response body stream breaks
-    /// mid-transfer, e.g. a reset connection), request timeouts, and a truncated body (an exact
-    /// <see cref="UpdaterException"/>, not one of its subclasses such as <see cref="ChecksumMismatchException"/>).
+    /// mid-transfer, e.g. a reset connection), request timeouts, a truncated body (an exact
+    /// <see cref="UpdaterException"/>, not one of its subclasses such as <see cref="ChecksumMismatchException"/>),
+    /// and a <see cref="GitHubApiException"/> carrying a transient GitHub status code (408, 429, or 5xx).
     /// Deliberately excludes plain <see cref="IOException"/> so local disk errors (full disk, locked file) writing
     /// the partial file fail fast instead of retrying a doomed operation. False for caller cancellation, argument
     /// errors, and every other library exception.
     /// </summary>
     private static bool IsTransient(Exception ex) =>
-        ex is HttpRequestException or TimeoutException or System.Net.Http.HttpIOException || ex.GetType() == typeof(UpdaterException);
+        ex is HttpRequestException or TimeoutException or System.Net.Http.HttpIOException
+        || ex.GetType() == typeof(UpdaterException)
+        || ex is GitHubApiException { StatusCode: HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError };
+
+    /// <summary>
+    /// Doubles <paramref name="baseDelay"/> per <paramref name="attempt"/>, clamped to <see cref="TimeSpan.MaxValue"/>
+    /// instead of overflowing when a large <paramref name="attempt"/> and/or <paramref name="baseDelay"/> would
+    /// otherwise push the result past what <see cref="TimeSpan"/> can represent.
+    /// </summary>
+    private static TimeSpan ExponentialDelay(TimeSpan baseDelay, int attempt)
+    {
+        var ticks = baseDelay.Ticks * Math.Pow(2, attempt);
+        return ticks >= TimeSpan.MaxValue.Ticks ? TimeSpan.MaxValue : TimeSpan.FromTicks((long)ticks);
+    }
 
     /// <summary>
     /// Copies <paramref name="source"/> to <paramref name="target"/> in <see cref="BufferSize"/> chunks, reporting
-    /// progress at most every <see cref="ProgressInterval"/> and throwing if the final received byte count (starting
-    /// from <paramref name="initialReceived"/>, non-zero when resuming a partial download) falls short of <paramref name="total"/>.
+    /// progress and (when <paramref name="checkpoint"/> is supplied) recording a resume checkpoint at most every
+    /// <see cref="ProgressInterval"/> — except the very first chunk, which is always checkpointed immediately so a
+    /// failure right after it still leaves a verified, resumable partial instead of waiting out a full interval —
+    /// and throwing if the final received byte count (starting from <paramref name="initialReceived"/>, non-zero
+    /// when resuming a partial download) falls short of <paramref name="total"/>.
     /// </summary>
-    private async Task CopyWithProgressAsync(Stream source, Stream target, long initialReceived, long? total, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+    private async Task CopyWithProgressAsync(
+        Stream source,
+        FileStream target,
+        long initialReceived,
+        long? total,
+        IProgress<DownloadProgress>? progress,
+        (string MetaPath, GitHubAsset Asset)? checkpoint,
+        CancellationToken cancellationToken)
     {
         var buffer = new byte[BufferSize];
         long received = initialReceived;
         var stopwatch = Stopwatch.StartNew();
         var lastReport = TimeSpan.Zero;
+        var lastCheckpoint = TimeSpan.Zero;
+        var checkpointed = false;
 
         progress?.Report(new DownloadProgress(received, total, TimeSpan.Zero));
         int read;
@@ -258,15 +455,26 @@ public sealed class AssetDownloader
         {
             await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             received += read;
-            if (progress is not null && stopwatch.Elapsed - lastReport >= ProgressInterval)
+
+            if (checkpoint is { } cp && (!checkpointed || stopwatch.Elapsed - lastCheckpoint >= ProgressInterval))
+            {
+                checkpointed = true;
+                lastCheckpoint = stopwatch.Elapsed;
+                await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                WriteCheckpoint(cp.MetaPath, cp.Asset, received, ComputeTailHash(target, received));
+            }
+
+            if (stopwatch.Elapsed - lastReport >= ProgressInterval)
             {
                 lastReport = stopwatch.Elapsed;
-                progress.Report(new DownloadProgress(received, total, stopwatch.Elapsed));
+                progress?.Report(new DownloadProgress(received, total, stopwatch.Elapsed));
             }
         }
 
         if (total is { } expected && received != expected)
+        {
             throw new UpdaterException($"Download truncated: expected {expected} bytes but received {received}.");
+        }
 
         progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed));
     }
@@ -287,7 +495,9 @@ public sealed class AssetDownloader
     {
         var cleaned = new string(name.Select(c => InvalidFileNameChars.Contains(c) ? '_' : c).ToArray()).Trim();
         if (cleaned.Length == 0 || cleaned is "." or "..")
+        {
             throw new ArgumentException($"Invalid asset file name '{name}'.", nameof(name));
+        }
         return cleaned;
     }
 
@@ -298,7 +508,10 @@ public sealed class AssetDownloader
     {
         try
         {
-            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }

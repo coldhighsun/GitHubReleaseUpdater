@@ -199,6 +199,15 @@ public class ReleaseUpdaterTests : IDisposable
     }
 
     [Fact]
+    public void Negative_download_retry_delay_is_rejected()
+    {
+        var client = new FakeReleaseClient();
+        var options = Options("1.0.0", downloadRetryDelay: TimeSpan.FromSeconds(-1));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
+    }
+
+    [Fact]
     public async Task Download_mismatch_deletes_file_and_throws()
     {
         var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
