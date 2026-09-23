@@ -33,7 +33,7 @@ jobs:
     - name: Test
       run: dotnet test --no-build --verbosity normal -c Release --report-trx --coverage --coverage-output-format cobertura --results-directory ./coverage
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@v7
       with:
         files: ./coverage/*.cobertura.xml
         token: ${{ secrets.CODECOV_TOKEN }}
@@ -43,7 +43,7 @@ jobs:
       run: dotnet pack src/GitHubReleaseUpdater/GitHubReleaseUpdater.csproj --no-build -c Release -o ./artifacts
     - name: Upload package artifact
       if: startsWith(github.ref, 'refs/tags/v')
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: nuget-package
         path: ./artifacts/*.*nupkg
@@ -59,7 +59,7 @@ jobs:
 
     steps:
     - name: Download package artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: nuget-package
         path: ./artifacts
