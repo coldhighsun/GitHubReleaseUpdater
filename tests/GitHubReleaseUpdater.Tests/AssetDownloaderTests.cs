@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 using System.Security.Cryptography;
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
@@ -354,6 +355,54 @@ public class AssetDownloaderTests : IDisposable
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+    }
+
+    [Fact]
+    public async Task Cancelling_while_waiting_for_the_per_path_lock_does_not_leak_the_lock_entry()
+    {
+        var asset = new GitHubAsset { Name = "a.bin" };
+        var holder = new BlockingClient();
+        using var holderCts = new CancellationTokenSource();
+        var holderTask = new AssetDownloader(holder).DownloadAsync(asset, _dir, cancellationToken: holderCts.Token);
+        await holder.Started.Task; // Holder now owns the per-path lock and is blocked reading.
+
+        var pathLocksField = typeof(AssetDownloader).GetField("PathLocks", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var pathLocks = (System.Collections.IDictionary)pathLocksField.GetValue(null)!;
+        var pathKey = Path.GetFullPath(Path.Combine(_dir, "a.bin.partial"));
+        var refCountField = pathLocks[pathKey]!.GetType().GetField("RefCount")!;
+
+        // A second caller for the same destination is cancelled before it ever acquires the lock the holder owns.
+        using var waiterCts = new CancellationTokenSource();
+        waiterCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => new AssetDownloader(new BlockingClient()).DownloadAsync(asset, _dir, cancellationToken: waiterCts.Token));
+
+        // The cancelled waiter must not leave its increment behind on the holder's still-live lock entry.
+        Assert.Equal(1, refCountField.GetValue(pathLocks[pathKey]));
+
+        holderCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => holderTask);
+
+        // Once the sole remaining holder releases it, the entry must be evicted rather than left behind forever.
+        Assert.False(pathLocks.Contains(pathKey));
+    }
+
+    [Fact]
+    public async Task Malformed_checkpoint_line_deletes_the_stale_meta_file()
+    {
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = 5, ApiUrl = "https://api.example/assets/1" };
+        Directory.CreateDirectory(_dir);
+        await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), [1, 2, 3]);
+        // Identity line matches, but the checkpoint line isn't the expected "<length>:<hash>" format.
+        await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\nnot-a-checkpoint");
+
+        var client = new FlakyAssetClient { FailUntilAttempt = int.MaxValue, ExceptionFactory = () => new ArgumentException("boom") };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.False(File.Exists(Path.Combine(_dir, "a.bin.partial.meta")));
+        Assert.True(File.Exists(Path.Combine(_dir, "a.bin.partial")));
     }
 
     [Fact]
