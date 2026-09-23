@@ -352,17 +352,17 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
-    /// Flushes <paramref name="target"/>, hashes its last <see cref="TailHashWindow"/> bytes, and records the
-    /// checkpoint via <see cref="WriteCheckpoint"/> — all as one best-effort unit. Unlike <see cref="WriteCheckpoint"/>
-    /// alone, this also guards the flush and the tail-hash read-back: an I/O error at either step is just as
-    /// tolerable as one during the write itself, since a failed checkpoint only costs a future resume, never the
-    /// current transfer.
+    /// Flushes <paramref name="target"/>, then hashes its last <see cref="TailHashWindow"/> bytes and records the
+    /// checkpoint via <see cref="WriteCheckpoint"/> as a best-effort unit. Only the hash-and-write half is guarded:
+    /// a failed checkpoint only costs a future resume, never the current transfer, so an I/O error there is
+    /// tolerable — but the flush writes the actual downloaded bytes, not checkpoint bookkeeping, so its errors
+    /// (e.g. a full disk) are left to propagate and fail the transfer fast, same as before checkpointing existed.
     /// </summary>
     private static async Task TryCheckpointAsync(FileStream target, string metaPath, GitHubAsset asset, long verifiedLength, CancellationToken cancellationToken)
     {
+        await target.FlushAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await target.FlushAsync(cancellationToken).ConfigureAwait(false);
             WriteCheckpoint(metaPath, asset, verifiedLength, ComputeTailHash(target, verifiedLength));
         }
         catch (IOException) { }
@@ -400,15 +400,23 @@ public sealed class AssetDownloader
     /// <summary>
     /// Hashes the last <see cref="TailHashWindow"/> bytes (or fewer, if <paramref name="length"/> is smaller)
     /// already written to <paramref name="target"/>, reading back through the same handle (which must have just
-    /// been flushed) and restoring its position to <paramref name="length"/> afterwards so writing can continue.
+    /// been flushed) and restoring its position to <paramref name="length"/> afterwards — even if the read itself
+    /// throws — so a caller that swallows the exception can safely keep writing to <paramref name="target"/>
+    /// without silently continuing from the wrong offset.
     /// </summary>
     private static string ComputeTailHash(FileStream target, long length)
     {
         var start = Math.Max(0, length - TailHashWindow);
         var buffer = new byte[length - start];
         target.Position = start;
-        target.ReadExactly(buffer);
-        target.Position = length;
+        try
+        {
+            target.ReadExactly(buffer);
+        }
+        finally
+        {
+            target.Position = length;
+        }
         return ComputeTailHash(buffer);
     }
 
