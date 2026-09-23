@@ -406,6 +406,26 @@ public class AssetDownloaderTests : IDisposable
     }
 
     [Fact]
+    public void ComputeTailHash_from_stream_restores_position_even_when_the_read_throws()
+    {
+        Directory.CreateDirectory(_dir);
+        var path = Path.Combine(_dir, "x.bin");
+        File.WriteAllBytes(path, [1, 2, 3]); // Only 3 bytes actually on disk.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+
+        var method = typeof(AssetDownloader).GetMethod(
+            "ComputeTailHash", BindingFlags.NonPublic | BindingFlags.Static, [typeof(FileStream), typeof(long)])!;
+
+        // Ask for 10 verified bytes when only 3 exist on disk, so the tail read throws EndOfStreamException.
+        Assert.ThrowsAny<Exception>(() => method.Invoke(null, [stream, 10L]));
+
+        // A caller that swallows that exception (as the async checkpoint path does) must still see the stream
+        // positioned at the requested length, not stuck mid-window, or its next write would silently overwrite
+        // already-written bytes instead of appending.
+        Assert.Equal(10, stream.Position);
+    }
+
+    [Fact]
     public async Task Sanitizes_invalid_file_name_characters()
     {
         var client = new FakeReleaseClient();
