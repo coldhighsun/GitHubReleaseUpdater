@@ -505,7 +505,7 @@ public sealed class AssetDownloader
         var lastCheckpoint = TimeSpan.Zero;
         var checkpointed = false;
 
-        progress?.Report(new DownloadProgress(received, total, TimeSpan.Zero));
+        progress?.Report(new DownloadProgress(received, total, TimeSpan.Zero) { ResumedBytes = initialReceived });
         int read;
         while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
         {
@@ -522,7 +522,7 @@ public sealed class AssetDownloader
             if (stopwatch.Elapsed - lastReport >= ProgressInterval)
             {
                 lastReport = stopwatch.Elapsed;
-                progress?.Report(new DownloadProgress(received, total, stopwatch.Elapsed));
+                progress?.Report(new DownloadProgress(received, total, stopwatch.Elapsed) { ResumedBytes = initialReceived });
             }
         }
 
@@ -531,7 +531,7 @@ public sealed class AssetDownloader
             throw new UpdaterException($"Download truncated: expected {expected} bytes but received {received}.");
         }
 
-        progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed));
+        progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed) { ResumedBytes = initialReceived });
     }
 
     /// <summary>
