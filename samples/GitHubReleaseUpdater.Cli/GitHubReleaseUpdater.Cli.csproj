@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="GitHubReleaseUpdater.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\GitHubReleaseUpdater\GitHubReleaseUpdater.csproj" />
   </ItemGroup>
 

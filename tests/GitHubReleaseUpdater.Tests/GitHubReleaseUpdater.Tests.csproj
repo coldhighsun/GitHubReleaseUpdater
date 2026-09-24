@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\GitHubReleaseUpdater\GitHubReleaseUpdater.csproj" />
+    <ProjectReference Include="..\..\samples\GitHubReleaseUpdater.Cli\GitHubReleaseUpdater.Cli.csproj" />
     <None Include="TestData\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
