@@ -33,8 +33,16 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
     public RuntimeAssetSelector(RuntimeInfo runtime, params string[] preferredExtensions)
     {
         ArgumentNullException.ThrowIfNull(runtime);
+        ArgumentNullException.ThrowIfNull(preferredExtensions);
+        if (preferredExtensions.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("Preferred extensions must not be null or empty.", nameof(preferredExtensions));
+        }
         _runtime = runtime;
-        _preferredExtensions = preferredExtensions.Select(e => e.StartsWith('.') ? e : "." + e).ToArray();
+        // Lowercased because Score matches them against the lowercased asset name.
+        _preferredExtensions = preferredExtensions
+            .Select(e => (e.StartsWith('.') ? e : "." + e).ToLowerInvariant())
+            .ToArray();
     }
 
     /// <inheritdoc />
