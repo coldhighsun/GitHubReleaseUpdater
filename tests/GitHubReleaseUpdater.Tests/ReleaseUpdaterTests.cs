@@ -109,6 +109,29 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.Same(error, result.Error);
     }
 
+    /// <summary>
+    /// An <see cref="HttpClient.Timeout"/> expiry is not a caller cancellation, so it must be captured in the
+    /// result like any other failure instead of escaping as <see cref="OperationCanceledException"/>.
+    /// </summary>
+    [Fact]
+    public async Task CheckForUpdateAsync_http_client_timeout_elapses_is_captured_as_TimeoutException()
+    {
+        using var http = new HttpClient(new DelayingHttpHandler()) { Timeout = TimeSpan.FromMilliseconds(50) };
+        using var updater = new ReleaseUpdater(new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            HttpClient = http,
+            Timeout = null,
+        });
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Success);
+        Assert.IsType<TimeoutException>(result.Error);
+    }
+
     [Fact]
     public async Task Cancellation_still_throws_instead_of_being_captured()
     {

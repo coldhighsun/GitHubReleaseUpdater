@@ -211,7 +211,20 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         {
             throw new TimeoutException($"GitHub request to '{request.RequestUri}' timed out after {scope.Timeout}.");
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && ex.InnerException is TimeoutException)
+        {
+            throw HttpClientTimeout(request.RequestUri, ex);
+        }
     }
+
+    /// <summary>
+    /// Builds the <see cref="TimeoutException"/> reported when <see cref="HttpClient.Timeout"/> of <see cref="_http"/>
+    /// itself elapsed, which <see cref="HttpClient"/> surfaces as a <see cref="TaskCanceledException"/> wrapping a
+    /// <see cref="TimeoutException"/>. Other cancellations not from the caller's token (e.g. a handler's own timeout
+    /// or <see cref="HttpClient.CancelPendingRequests"/>) are left as <see cref="OperationCanceledException"/>.
+    /// </summary>
+    private TimeoutException HttpClientTimeout(Uri? url, OperationCanceledException inner)
+        => new($"GitHub request to '{url}' timed out after {_http.Timeout} (HttpClient.Timeout).", inner);
 
     /// <summary>
     /// Bounds a scope of work to <see cref="_timeout"/> via a dedicated, own timer-driven <see cref="CancellationTokenSource"/>
@@ -390,6 +403,10 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         catch (OperationCanceledException) when (scope.IsTimeout)
         {
             throw new TimeoutException($"GitHub request to '{url}' timed out after {scope.Timeout}.");
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && ex.InnerException is TimeoutException)
+        {
+            throw HttpClientTimeout(url, ex);
         }
     }
 }

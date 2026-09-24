@@ -99,6 +99,19 @@ internal sealed class StubHttpHandler : HttpMessageHandler
 /// <summary>
 /// Never responds until the request is cancelled, for exercising <see cref="UpdaterOptions.Timeout"/>.
 /// </summary>
+/// <summary>
+/// Handler that cancels the request on its own (as a handler-level timeout or <see cref="HttpClient.CancelPendingRequests"/>
+/// would), without the caller's token or <see cref="HttpClient.Timeout"/> being involved.
+/// </summary>
+internal sealed class SelfCancellingHttpHandler : HttpMessageHandler
+{
+    /// <summary>
+    /// Always throws <see cref="TaskCanceledException"/> without an inner <see cref="TimeoutException"/>.
+    /// </summary>
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => throw new TaskCanceledException("cancelled by the handler");
+}
+
 internal sealed class DelayingHttpHandler : HttpMessageHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
