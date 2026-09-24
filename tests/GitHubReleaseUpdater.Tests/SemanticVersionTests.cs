@@ -67,6 +67,42 @@ public class SemanticVersionTests
         Assert.True(a.CompareTo(b) < 0);
     }
 
+    /// <summary>
+    /// Numeric prerelease identifiers beyond <see cref="int"/> (and <see cref="long"/>) range, such as CI timestamps,
+    /// must still compare numerically rather than falling back to ordinal string comparison.
+    /// </summary>
+    [Theory]
+    [InlineData("1.0.0-ci.3000000000", "1.0.0-ci.20240924120000")]
+    [InlineData("1.0.0-ci.9", "1.0.0-ci.2147483648")]
+    [InlineData("1.0.0-ci.99999999999999999999", "1.0.0-ci.100000000000000000000")]
+    [InlineData("1.0.0-ci.20240924120000", "1.0.0-ci.alpha")]
+    public void CompareTo_numeric_prerelease_identifier_exceeds_int_range_compares_numerically(string lower, string higher)
+    {
+        SemanticVersion a = lower, b = higher;
+
+        var result = a.CompareTo(b);
+
+        Assert.True(result < 0);
+        Assert.True(b.CompareTo(a) > 0);
+    }
+
+    /// <summary>
+    /// Versions that compare equal because numeric prerelease identifiers differ only in leading zeros must also hash
+    /// equal, or hash-based collections would treat them as distinct.
+    /// </summary>
+    [Fact]
+    public void GetHashCode_numeric_prerelease_identifiers_differ_only_in_leading_zeros_are_equal()
+    {
+        var a = new SemanticVersion(1, 0, 0, "beta.01");
+        var b = new SemanticVersion(1, 0, 0, "beta.1");
+
+        var hashA = a.GetHashCode();
+        var hashB = b.GetHashCode();
+
+        Assert.Equal(a, b);
+        Assert.Equal(hashA, hashB);
+    }
+
     [Fact]
     public void Build_metadata_is_ignored_for_equality()
     {

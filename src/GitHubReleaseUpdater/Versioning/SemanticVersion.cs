@@ -175,24 +175,83 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         var n = Math.Min(ia.Length, ib.Length);
         for (var i = 0; i < n; i++)
         {
-            var na = int.TryParse(ia[i], NumberStyles.None, CultureInfo.InvariantCulture, out var va);
-            var nb = int.TryParse(ib[i], NumberStyles.None, CultureInfo.InvariantCulture, out var vb);
+            var na = IsNumericIdentifier(ia[i]);
+            var nb = IsNumericIdentifier(ib[i]);
             int c;
-            if (na && nb) c = va.CompareTo(vb);
-            else if (na) c = -1;              // numeric identifiers have lower precedence than alphanumeric
-            else if (nb) c = 1;
-            else c = string.CompareOrdinal(ia[i], ib[i]);
+            if (na && nb)
+            {
+                c = CompareNumericIdentifiers(ia[i], ib[i]);
+            }
+            else if (na)
+            {
+                c = -1;              // numeric identifiers have lower precedence than alphanumeric
+            }
+            else if (nb)
+            {
+                c = 1;
+            }
+            else
+            {
+                c = string.CompareOrdinal(ia[i], ib[i]);
+            }
             if (c != 0) return c;
         }
         return ia.Length.CompareTo(ib.Length);
+    }
+
+    /// <summary>
+    /// True when <paramref name="id"/> is a non-empty run of ASCII digits, regardless of whether its value fits in
+    /// any integer type (e.g. a 14-digit timestamp).
+    /// </summary>
+    private static bool IsNumericIdentifier(string id)
+    {
+        if (id.Length == 0)
+        {
+            return false;
+        }
+        foreach (var c in id)
+        {
+            if (!char.IsAsciiDigit(c))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Compares two all-digit identifiers by numeric value without parsing them, so values beyond
+    /// <see cref="long.MaxValue"/> still compare correctly: after dropping leading zeros, the longer one is larger,
+    /// and equal-length ones compare digit by digit.
+    /// </summary>
+    private static int CompareNumericIdentifiers(string a, string b)
+    {
+        var ta = a.AsSpan().TrimStart('0');
+        var tb = b.AsSpan().TrimStart('0');
+        var c = ta.Length.CompareTo(tb.Length);
+        return c != 0 ? c : ta.SequenceCompareTo(tb);
     }
 
     /// <inheritdoc />
     public bool Equals(SemanticVersion? other) => other is not null && CompareTo(other) == 0;
     /// <inheritdoc />
     public override bool Equals(object? obj) => Equals(obj as SemanticVersion);
-    /// <inheritdoc />
-    public override int GetHashCode() => HashCode.Combine(Major, Minor, Patch, Prerelease);
+    /// <summary>
+    /// Hashes the same things <see cref="CompareTo"/> compares: numeric prerelease identifiers are hashed without
+    /// leading zeros, so versions that compare equal (e.g. prerelease <c>beta.01</c> and <c>beta.1</c>) hash equal.
+    /// </summary>
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(Major);
+        hash.Add(Minor);
+        hash.Add(Patch);
+        foreach (var id in Prerelease.Split('.'))
+        {
+            hash.Add(IsNumericIdentifier(id) ? id.TrimStart('0') : id, StringComparer.Ordinal);
+        }
+        return hash.ToHashCode();
+    }
 
     /// <inheritdoc />
     public override string ToString()
