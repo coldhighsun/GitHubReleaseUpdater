@@ -200,6 +200,26 @@ public class AssetDownloaderTests : IDisposable
         await downloader.DownloadAsync(asset, _dir, overwrite: true);
     }
 
+    /// <summary>
+    /// With <c>overwrite: true</c> an existing final file is replaced by the new content and no partial or sidecar
+    /// files are left behind.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_overwrite_enabled_replaces_existing_file_contents()
+    {
+        var client = new FakeReleaseClient();
+        client.AssetBytes["a.bin"] = [1];
+        var asset = new GitHubAsset { Name = "a.bin" };
+        var downloader = new AssetDownloader(client);
+        await downloader.DownloadAsync(asset, _dir);
+        client.AssetBytes["a.bin"] = [2, 3];
+
+        var path = await downloader.DownloadAsync(asset, _dir, overwrite: true);
+
+        Assert.Equal([2, 3], await File.ReadAllBytesAsync(path));
+        Assert.Equal([path], Directory.GetFiles(_dir));
+    }
+
     [Fact]
     public async Task Retries_transient_failure_and_succeeds()
     {
