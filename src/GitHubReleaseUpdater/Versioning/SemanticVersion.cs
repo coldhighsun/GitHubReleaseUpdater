@@ -66,11 +66,7 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
         version = null;
         if (string.IsNullOrWhiteSpace(input)) return false;
 
-        var s = input.AsSpan().Trim();
-        if (!string.IsNullOrEmpty(tagPrefix) && s.StartsWith(tagPrefix, StringComparison.OrdinalIgnoreCase))
-            s = s[tagPrefix.Length..];
-        if (s.Length > 0 && (s[0] == 'v' || s[0] == 'V'))
-            s = s[1..];
+        var s = StripTagPrefix(input, tagPrefix);
         if (s.IsEmpty) return false;
 
         string? build = null;
@@ -107,6 +103,24 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
 
         version = new SemanticVersion(parts[0], parts[1], parts[2], pre, build);
         return true;
+    }
+
+    /// <summary>
+    /// Returns <paramref name="tag"/> with surrounding whitespace, then <paramref name="tagPrefix"/> (case-insensitive)
+    /// and then a single leading <c>v</c>/<c>V</c> removed — the text <see cref="TryParse"/> parses as the version.
+    /// </summary>
+    internal static ReadOnlySpan<char> StripTagPrefix(string tag, string? tagPrefix)
+    {
+        var s = tag.AsSpan().Trim();
+        if (!string.IsNullOrEmpty(tagPrefix) && s.StartsWith(tagPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            s = s[tagPrefix.Length..];
+        }
+        if (s.Length > 0 && s[0] is 'v' or 'V')
+        {
+            s = s[1..];
+        }
+        return s;
     }
 
     /// <summary>
