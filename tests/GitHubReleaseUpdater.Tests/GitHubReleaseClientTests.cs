@@ -298,6 +298,77 @@ public class GitHubReleaseClientTests
         Assert.NotNull(ex.RateLimitResetAt);
     }
 
+    /// <summary>
+    /// For a secondary rate limit GitHub sends both headers; <c>Retry-After</c> is when retrying is actually allowed,
+    /// while <c>X-RateLimit-Reset</c> is the (possibly much later) primary quota reset.
+    /// </summary>
+    [Fact]
+    public async Task ListReleasesAsync_retry_after_and_reset_headers_both_present_prefers_retry_after()
+    {
+        var reset = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds();
+        var handler = new StubHttpHandler().On("/releases", HttpStatusCode.Forbidden, "{\"message\":\"You have exceeded a secondary rate limit\"}", configure: r =>
+        {
+            r.Headers.Add("X-RateLimit-Remaining", "10");
+            r.Headers.Add("X-RateLimit-Reset", reset.ToString());
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(30));
+        });
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.ListReleasesAsync("o", "r"));
+
+        Assert.True(ex.IsRateLimited);
+        Assert.NotNull(ex.RateLimitResetAt);
+        Assert.InRange(ex.RateLimitResetAt.Value, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(1));
+    }
+
+    /// <summary>
+    /// <c>Retry-After</c> may also be an HTTP date rather than a number of seconds.
+    /// </summary>
+    [Fact]
+    public async Task GetLatestReleaseAsync_retry_after_is_http_date_uses_that_date()
+    {
+        var retryAt = new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.TooManyRequests, "{\"message\":\"secondary rate limit\"}", configure: r =>
+        {
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(retryAt);
+        });
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.True(ex.IsRateLimited);
+        Assert.NotNull(ex.RateLimitResetAt);
+        Assert.True((ex.RateLimitResetAt.Value - retryAt).Duration() < TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// A <c>Retry-After</c> date is measured against the response's <c>Date</c> header, so a client clock that is ahead
+    /// of the server (or a date already in the past) never yields a reset time earlier than now.
+    /// </summary>
+    [Theory]
+    [InlineData(60, 60)]
+    [InlineData(-60, 0)]
+    public async Task GetLatestReleaseAsync_retry_after_date_is_relative_to_server_date(int retryAfterSeconds, int expectedWaitSeconds)
+    {
+        // The server's clock is an hour behind the client's; Retry-After is relative to that clock.
+        var serverNow = DateTimeOffset.UtcNow - TimeSpan.FromHours(1);
+        var retryAt = serverNow + TimeSpan.FromSeconds(retryAfterSeconds);
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.TooManyRequests, "{\"message\":\"secondary rate limit\"}", configure: r =>
+        {
+            r.Headers.Date = serverNow;
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(retryAt);
+        });
+        using var client = TestData.Client(handler);
+
+        var before = DateTimeOffset.UtcNow;
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.NotNull(ex.RateLimitResetAt);
+        var wait = ex.RateLimitResetAt.Value - before;
+        Assert.True(wait >= TimeSpan.FromSeconds(expectedWaitSeconds) - TimeSpan.FromSeconds(2), $"wait was {wait}");
+        Assert.True(wait <= TimeSpan.FromSeconds(expectedWaitSeconds) + TimeSpan.FromSeconds(5), $"wait was {wait}");
+    }
+
     [Fact]
     public async Task Error_with_non_json_body_still_throws_with_generic_message()
     {
