@@ -167,7 +167,13 @@ internal static class TestData
     public static GitHubReleaseClient Client(HttpMessageHandler handler, TimeSpan? timeout)
         => new(null, null, "tests", new HttpClient(handler), timeout);
 
-    public static GitHubRelease Release(string tag, params string[] assetNames) => new()
+    public static GitHubRelease Release(string tag, params string[] assetNames) => Release(tag, 10, assetNames);
+
+    /// <summary>
+    /// Builds a release whose assets all list <paramref name="assetSize"/> as their size, for tests whose asset body
+    /// must match the listed size (the downloader rejects a body whose total differs from it).
+    /// </summary>
+    public static GitHubRelease Release(string tag, long assetSize, params string[] assetNames) => new()
     {
         Id = 1,
         TagName = tag,
@@ -175,7 +181,7 @@ internal static class TestData
         {
             Id = i + 1,
             Name = n,
-            Size = 10,
+            Size = assetSize,
             BrowserDownloadUrl = $"https://github.com/o/r/releases/download/{tag}/{n}",
             ApiUrl = $"https://api.github.com/repos/o/r/releases/assets/{i + 1}",
         }).ToArray(),

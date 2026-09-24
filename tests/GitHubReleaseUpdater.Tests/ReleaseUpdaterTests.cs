@@ -185,7 +185,7 @@ public class ReleaseUpdaterTests : IDisposable
     {
         var payload = Encoding.ASCII.GetBytes("hello world");
         var hash = Convert.ToHexStringLower(SHA256.HashData(payload));
-        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip", "SHA256SUMS") };
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", payload.Length, "app-win-x64.zip", "SHA256SUMS") };
         client.AssetBytes["app-win-x64.zip"] = payload;
         client.AssetBytes["SHA256SUMS"] = Encoding.ASCII.GetBytes($"{hash}  app-win-x64.zip\n");
         using var updater = new ReleaseUpdater(Options("1.0.0"), client);
@@ -201,7 +201,7 @@ public class ReleaseUpdaterTests : IDisposable
     [Fact]
     public async Task Download_retries_transient_failure_using_configured_options()
     {
-        var release = TestData.Release("v2.0.0", "app-win-x64.zip");
+        var release = TestData.Release("v2.0.0", 3, "app-win-x64.zip");
         var client = new FlakyAssetClient { Bytes = [1, 2, 3], FailUntilAttempt = 2 };
         var options = Options("1.0.0", checksums: NoChecksumProvider.Instance, downloadMaxRetryAttempts: 2, downloadRetryDelay: TimeSpan.Zero);
         using var updater = new ReleaseUpdater(options, client);
@@ -233,7 +233,7 @@ public class ReleaseUpdaterTests : IDisposable
     [Fact]
     public async Task Download_mismatch_deletes_file_and_throws()
     {
-        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", 3, "app-win-x64.zip") };
         client.AssetBytes["app-win-x64.zip"] = [1, 2, 3];
         using var updater = new ReleaseUpdater(Options("1.0.0", checksums: new StaticChecksumProvider(new string('f', 64))), client);
 
@@ -247,7 +247,7 @@ public class ReleaseUpdaterTests : IDisposable
     [Fact]
     public async Task Download_without_checksum_is_unverified_unless_required()
     {
-        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", 3, "app-win-x64.zip") };
         client.AssetBytes["app-win-x64.zip"] = [1, 2, 3];
 
         using (var updater = new ReleaseUpdater(Options("1.0.0"), client))
@@ -453,7 +453,7 @@ public class ReleaseUpdaterTests : IDisposable
     {
         var payload = Encoding.ASCII.GetBytes("test");
         var handler = new StubHttpHandler()
-            .On("/repos/o/r/releases/latest", System.Net.HttpStatusCode.OK, TestData.Read("release-latest.json"))
+            .On("/repos/o/r/releases/latest", System.Net.HttpStatusCode.OK, TestData.Read("release-latest.json").Replace("\"size\": 1234", $"\"size\": {payload.Length}", StringComparison.Ordinal))
             .OnBytes("/releases/assets/1", payload)
             .On("/releases/assets/3", System.Net.HttpStatusCode.OK, TestData.Read("SHA256SUMS"), "text/plain");
         using var updater = new ReleaseUpdater(new UpdaterOptions
