@@ -109,6 +109,58 @@ public class AssetSelectorTests
         Assert.Null(new PatternAssetSelector("nothing-{tag}.zip", rt).Select(release));
     }
 
+    /// <summary>
+    /// <c>{tagversion}</c> keeps the tag's version text verbatim (only the tag prefix and a leading <c>v</c> are
+    /// stripped), so assets named after an abbreviated or differently-cased tag still match where the normalized
+    /// <c>{version}</c> would not.
+    /// </summary>
+    [Theory]
+    [InlineData("v1.2", null, "app-1.2.zip")]
+    [InlineData("V1.2", null, "app-1.2.zip")]
+    [InlineData("release-1.2", "release-", "app-1.2.zip")]
+    [InlineData("release-v1.2.3-RC.1", "release-", "app-1.2.3-RC.1.zip")]
+    public void Select_tagversion_placeholder_matches_unnormalized_version(string tag, string? tagPrefix, string expected)
+    {
+        var release = TestData.Release(tag, "app-1.2.0.zip", expected);
+        var selector = new PatternAssetSelector("app-{tagversion}.zip", new RuntimeInfo("win", "x64"), tagPrefix);
+
+        var selected = selector.Select(release);
+
+        Assert.Equal(expected, selected?.Name);
+    }
+
+    /// <summary>
+    /// <c>{version}</c> keeps its normalized meaning, so existing patterns are unaffected by <c>{tagversion}</c>.
+    /// </summary>
+    [Fact]
+    public void Select_version_placeholder_still_expands_to_normalized_version()
+    {
+        var release = TestData.Release("v1.2", "app-1.2.zip", "app-1.2.0.zip");
+        var selector = new PatternAssetSelector("app-{version}.zip", new RuntimeInfo("win", "x64"));
+
+        var selected = selector.Select(release);
+
+        Assert.Equal("app-1.2.0.zip", selected?.Name);
+    }
+
+    /// <summary>
+    /// Values substituted for placeholders are matched literally: wildcard characters in a tag don't act as wildcards,
+    /// and placeholder-like text in a substituted value isn't expanded again.
+    /// </summary>
+    [Theory]
+    [InlineData("app-{tag}.zip", "build-*", "app-build-x.zip", "app-build-*.zip")]
+    [InlineData("app-{tag}.zip", "v1.0?", "app-v1.0x.zip", "app-v1.0?.zip")]
+    [InlineData("app-{tagversion}.zip", "v{tag}", "app-v{tag}.zip", "app-{tag}.zip")]
+    public void Select_tag_contains_wildcard_or_placeholder_text_matches_it_literally(string pattern, string tag, string decoy, string expected)
+    {
+        var release = TestData.Release(tag, decoy, expected);
+        var selector = new PatternAssetSelector(pattern, new RuntimeInfo("win", "x64"));
+
+        var selected = selector.Select(release);
+
+        Assert.Equal(expected, selected?.Name);
+    }
+
     [Fact]
     public void Pattern_selector_escapes_regex_metacharacters()
     {

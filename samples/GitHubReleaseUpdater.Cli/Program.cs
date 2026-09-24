@@ -25,7 +25,7 @@ internal static class Cli
           --base-url <url>   API base for GitHub Enterprise, e.g. https://ghe.example.com/api/v3/
           --prerelease       Consider pre-releases as candidates.
           --tag-prefix <p>   Extra tag prefix to strip, e.g. "release-".
-          --asset <pattern>  Asset pattern with wildcards and {os} {arch} {rid} {version} {tag}.
+          --asset <pattern>  Asset pattern with wildcards and {os} {arch} {rid} {version} {tagversion} {tag}.
                              Default: auto-detect for the current OS/arch.
           --sha256 <hex>     Expected SHA-256 instead of reading it from the release.
           --require-checksum Fail when no checksum can be found.
