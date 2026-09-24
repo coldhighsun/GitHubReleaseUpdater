@@ -1,4 +1,5 @@
 using GitHubReleaseUpdater.Exceptions;
+using GitHubReleaseUpdater.GitHub;
 using System.Net;
 
 namespace GitHubReleaseUpdater.Tests;
@@ -329,6 +330,62 @@ public class GitHubReleaseClientTests
         var release = await client.GetLatestReleaseAsync("o", "r");
 
         Assert.NotNull(release);
+    }
+
+    /// <summary>
+    /// With the per-request timeout disabled, <see cref="HttpClient.Timeout"/> elapsing must surface as
+    /// <see cref="TimeoutException"/> rather than a <see cref="TaskCanceledException"/> that looks like caller cancellation.
+    /// </summary>
+    [Fact]
+    public async Task GetLatestReleaseAsync_http_client_timeout_elapses_throws_TimeoutException()
+    {
+        using var http = new HttpClient(new DelayingHttpHandler()) { Timeout = TimeSpan.FromMilliseconds(50) };
+        using var client = new GitHubReleaseClient(null, null, "tests", http, timeout: null);
+
+        var ex = await Assert.ThrowsAsync<TimeoutException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.IsAssignableFrom<OperationCanceledException>(ex.InnerException);
+    }
+
+    /// <summary>
+    /// Same as <see cref="GetLatestReleaseAsync_http_client_timeout_elapses_throws_TimeoutException"/>, for the asset download path.
+    /// </summary>
+    [Fact]
+    public async Task OpenAssetStreamAsync_http_client_timeout_elapses_throws_TimeoutException()
+    {
+        using var http = new HttpClient(new DelayingHttpHandler()) { Timeout = TimeSpan.FromMilliseconds(50) };
+        using var client = new GitHubReleaseClient(null, null, "tests", http, timeout: null);
+        var asset = TestData.Release("v1", "a.bin").Assets[0];
+
+        await Assert.ThrowsAsync<TimeoutException>(() => client.OpenAssetStreamAsync(asset));
+    }
+
+    /// <summary>
+    /// A cancellation raised by a handler itself (not the caller's token and not <see cref="HttpClient.Timeout"/>) must
+    /// stay an <see cref="OperationCanceledException"/> instead of being misreported as an HttpClient timeout.
+    /// </summary>
+    [Fact]
+    public async Task GetLatestReleaseAsync_handler_cancels_on_its_own_throws_OperationCanceledException()
+    {
+        using var http = new HttpClient(new SelfCancellingHttpHandler());
+        using var client = new GitHubReleaseClient(null, null, "tests", http, timeout: null);
+
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.IsNotType<TimeoutException>(ex.InnerException);
+    }
+
+    /// <summary>
+    /// Same as <see cref="GetLatestReleaseAsync_handler_cancels_on_its_own_throws_OperationCanceledException"/>, for the asset download path.
+    /// </summary>
+    [Fact]
+    public async Task OpenAssetStreamAsync_handler_cancels_on_its_own_throws_OperationCanceledException()
+    {
+        using var http = new HttpClient(new SelfCancellingHttpHandler());
+        using var client = new GitHubReleaseClient(null, null, "tests", http, timeout: null);
+        var asset = TestData.Release("v1", "a.bin").Assets[0];
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.OpenAssetStreamAsync(asset));
     }
 
     [Fact]
