@@ -182,8 +182,12 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
             await EnsureSuccessAsync(response, allowNotFound: false, cancellationToken).ConfigureAwait(false);
             var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             var isPartial = rangeStart > 0 && response.StatusCode == HttpStatusCode.PartialContent;
-            var totalLength = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength;
-            return new AssetStream(stream, response.Content.Headers.ContentLength, response, isPartial, rangeStart, totalLength);
+            var contentLength = response.Content.Headers.ContentLength;
+            var range = response.Content.Headers.ContentRange;
+            // A partial body's Content-Length is only the remaining bytes, so never mistake it for the whole asset's.
+            // IsMisalignedPartialResponse has already ensured a partial response carries a byte range.
+            var totalLength = isPartial ? KnownOrImpliedTotal(range!) : range?.Length ?? contentLength;
+            return new AssetStream(stream, contentLength, response, isPartial, rangeStart, totalLength);
         }
         catch
         {
@@ -195,7 +199,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     /// <summary>
     /// True when <paramref name="response"/> is a <c>206 Partial Content</c> to a range request for
     /// <paramref name="rangeStart"/> whose <c>Content-Range</c> is missing, isn't in bytes, starts at a different
-    /// offset, or reports a total length other than <paramref name="assetSize"/> (when that is known).
+    /// offset, or whose reported or implied total (see <see cref="KnownOrImpliedTotal"/>) differs from
+    /// <paramref name="assetSize"/> (when that is known). An unknown total (<c>bytes N-M/*</c>) is also rejected when
+    /// <paramref name="assetSize"/> is unknown, since nothing then proves the range runs to the end of the asset.
     /// </summary>
     private static bool IsMisalignedPartialResponse(HttpResponseMessage response, long rangeStart, long assetSize)
     {
@@ -207,8 +213,15 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         return range is null
                || !string.Equals(range.Unit, "bytes", StringComparison.OrdinalIgnoreCase)
                || range.From != rangeStart
-               || (assetSize > 0 && range.Length is { } length && length != assetSize);
+               || (assetSize > 0 ? KnownOrImpliedTotal(range) != assetSize : range.Length is null);
     }
+
+    /// <summary>
+    /// The asset's total length from a byte <c>Content-Range</c>: the reported total or, when that is unknown
+    /// (<c>bytes N-M/*</c>), one past the last byte served, since an open-ended request (<c>bytes=N-</c>) asks for
+    /// everything up to the end of the asset.
+    /// </summary>
+    private static long? KnownOrImpliedTotal(ContentRangeHeaderValue range) => range.Length ?? range.To + 1;
 
     /// <inheritdoc />
     public async Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
