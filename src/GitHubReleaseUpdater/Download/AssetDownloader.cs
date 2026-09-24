@@ -223,7 +223,7 @@ public sealed class AssetDownloader
                     {
                         throw;
                     }
-                    await Task.Delay(ExponentialDelay(RetryDelay, attempt), cancellationToken).ConfigureAwait(false);
+                    await DelayBeforeRetryAsync(attempt, partialPath, metaPath, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (attempt < MaxRetryAttempts && IsTransient(ex))
                 {
@@ -232,7 +232,7 @@ public sealed class AssetDownloader
                         TryDelete(partialPath);
                         TryDelete(metaPath);
                     }
-                    await Task.Delay(ExponentialDelay(RetryDelay, attempt), cancellationToken).ConfigureAwait(false);
+                    await DelayBeforeRetryAsync(attempt, partialPath, metaPath, cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -440,6 +440,26 @@ public sealed class AssetDownloader
         ex is HttpRequestException or TimeoutException or System.Net.Http.HttpIOException
         || ex.GetType() == typeof(UpdaterException)
         || ex is GitHubApiException { StatusCode: HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError };
+
+    /// <summary>
+    /// Waits out the backoff before retry <paramref name="attempt"/> + 1. Runs inside a <c>catch</c> block of the retry
+    /// loop, whose sibling <c>catch (OperationCanceledException)</c> can't see an exception thrown from here — so a
+    /// caller cancellation during the wait does its own cleanup, keeping the "caller cancellation always removes the
+    /// partial file" contract of <see cref="DownloadAsync"/>.
+    /// </summary>
+    private async Task DelayBeforeRetryAsync(int attempt, string partialPath, string metaPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(ExponentialDelay(RetryDelay, attempt), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryDelete(partialPath);
+            TryDelete(metaPath);
+            throw;
+        }
+    }
 
     /// <summary>
     /// Doubles <paramref name="baseDelay"/> per <paramref name="attempt"/>, clamped to <see cref="TimeSpan.MaxValue"/>

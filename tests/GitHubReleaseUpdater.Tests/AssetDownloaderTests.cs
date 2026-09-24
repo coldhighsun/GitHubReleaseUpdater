@@ -357,6 +357,26 @@ public class AssetDownloaderTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
     }
 
+    /// <summary>
+    /// A caller cancellation that lands during the backoff between retries (rather than mid-transfer) must still
+    /// remove the partial file left by the failed attempt, even though resume is enabled.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_cancelled_during_retry_backoff_removes_partial_file()
+    {
+        using var cts = new CancellationTokenSource();
+        // Cancel exactly when the transient failure is raised, so the cancellation is first observed by the backoff
+        // wait rather than depending on a timer racing the download.
+        var client = new ResumableAssetClient { FullBytes = [1, 2, 3, 4, 5], FailAfterBytesOnAttempt = 1, FailAfterBytes = 2, BeforeFailure = cts.Cancel };
+        var asset = new GitHubAsset { Name = "a.bin", Size = 5, ApiUrl = "https://api.example/assets/1" };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.FromMinutes(1) };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloader.DownloadAsync(asset, _dir, cancellationToken: cts.Token));
+
+        Assert.Equal(1, client.Attempts);
+        Assert.Empty(Directory.GetFiles(_dir));
+    }
+
     [Fact]
     public async Task Cancelling_while_waiting_for_the_per_path_lock_does_not_leak_the_lock_entry()
     {

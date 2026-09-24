@@ -228,6 +228,12 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
     /// <summary>Bytes yielded on the failing attempt before it throws.</summary>
     public int FailAfterBytes { get; set; }
 
+    /// <summary>
+    /// Invoked on the failing attempt right before the simulated failure is thrown, e.g. to cancel the caller's token
+    /// at a deterministic point.
+    /// </summary>
+    public Action? BeforeFailure { get; set; }
+
     /// <summary>Number of calls made to <see cref="OpenAssetStreamAsync(GitHubAsset, long, CancellationToken)"/> so far.</summary>
     public int Attempts { get; private set; }
 
@@ -243,7 +249,7 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
         RequestedRangeStarts.Add(rangeStart);
         var effectiveStart = HonorRange ? rangeStart : 0;
         var remaining = FullBytes[(int)effectiveStart..];
-        Stream stream = Attempts == FailAfterBytesOnAttempt ? new FailingAfterStream(remaining, FailAfterBytes) : new MemoryStream(remaining);
+        Stream stream = Attempts == FailAfterBytesOnAttempt ? new FailingAfterStream(remaining, FailAfterBytes, BeforeFailure) : new MemoryStream(remaining);
         var isPartial = HonorRange && rangeStart > 0;
         return Task.FromResult(new AssetStream(stream, remaining.Length, new MemoryStream(), isPartial, rangeStart, FullBytes.Length));
     }
@@ -257,14 +263,17 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
     /// Stream that yields <paramref name="data"/> up to <paramref name="failAfter"/> bytes, then throws
     /// <see cref="HttpRequestException"/> as if the connection broke mid-transfer.
     /// </summary>
-    private sealed class FailingAfterStream(byte[] data, int failAfter) : Stream
+    private sealed class FailingAfterStream(byte[] data, int failAfter, Action? beforeFailure) : Stream
     {
         private int _position;
 
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (_position >= failAfter || _position >= data.Length)
+            {
+                beforeFailure?.Invoke();
                 throw new HttpRequestException("simulated connection reset mid-transfer");
+            }
             var toCopy = Math.Min(buffer.Length, Math.Min(data.Length - _position, failAfter - _position));
             data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
             _position += toCopy;
