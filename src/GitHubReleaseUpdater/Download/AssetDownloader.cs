@@ -204,11 +204,9 @@ public sealed class AssetDownloader
                     {
                         throw new IOException($"File already exists: {finalPath}");
                     }
-                    if (File.Exists(finalPath))
-                    {
-                        File.Delete(finalPath);
-                    }
-                    File.Move(partialPath, finalPath);
+                    // Replace in a single move so a failure can never leave the old file deleted without the new
+                    // one in place.
+                    File.Move(partialPath, finalPath, overwrite);
                     TryDelete(metaPath);
                     return finalPath;
                 }
