@@ -129,8 +129,13 @@ public sealed class ReleaseUpdater : IDisposable
             if (store is not null && !bypassThrottle && _options.MinimumCheckInterval is { } interval)
             {
                 var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
-                if (lastChecked is not null && DateTimeOffset.UtcNow - lastChecked.Value < interval)
+                var now = DateTimeOffset.UtcNow;
+                // A last-check time in the future (clock moved back, or a corrupt store) must not suppress checks
+                // until the clock catches up, so only throttle when it lies within the past interval.
+                if (lastChecked is { } last && last <= now && now - last < interval)
+                {
                     return UpdateCheckResult.ThrottledResult(_options.CurrentVersion);
+                }
             }
 
             var skipped = new List<string>();
