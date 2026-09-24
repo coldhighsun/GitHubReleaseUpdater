@@ -57,18 +57,25 @@ internal sealed class StubHttpHandler : HttpMessageHandler
     /// <summary>
     /// Serves <paramref name="fullBody"/> like a range-aware server: a request carrying a <c>Range: bytes=N-</c>
     /// header gets back <c>206 Partial Content</c> with <c>Content-Range: bytes N-{end}/{length}</c> and the tail
-    /// of the body from byte N; a request without one gets the full body as a normal <c>200 OK</c>.
+    /// of the body from byte N; a request without one gets the full body as a normal <c>200 OK</c>. When
+    /// <paramref name="reportTotalLength"/> is false the total is sent as unknown (<c>bytes N-{end}/*</c>). The
+    /// partial body stops at <paramref name="rangeEnd"/> (inclusive) when given, like a server that serves less
+    /// than was asked for, and omits <c>Content-Length</c> when <paramref name="includeLength"/> is false.
     /// </summary>
-    public StubHttpHandler OnRangeAwareBytes(string urlContains, byte[] fullBody)
+    public StubHttpHandler OnRangeAwareBytes(string urlContains, byte[] fullBody, bool reportTotalLength = true, long? rangeEnd = null, bool includeLength = true)
     {
         _routes.Add((r => r.RequestUri!.ToString().Contains(urlContains, StringComparison.Ordinal), r =>
         {
             var rangeStart = r.Headers.Range?.Ranges.FirstOrDefault()?.From;
             if (rangeStart is { } start && start > 0)
             {
-                var tail = fullBody[(int)start..];
-                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(tail) };
-                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, fullBody.Length - 1, fullBody.Length);
+                var end = rangeEnd ?? fullBody.Length - 1;
+                var tail = fullBody[(int)start..(int)(end + 1)];
+                HttpContent content = includeLength ? new ByteArrayContent(tail) : new StreamContentNoLength(tail);
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = content };
+                response.Content.Headers.ContentRange = reportTotalLength
+                    ? new ContentRangeHeaderValue(start, end, fullBody.Length)
+                    : new ContentRangeHeaderValue(start, end);
                 return response;
             }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fullBody) };
@@ -117,6 +124,11 @@ internal sealed class StubHttpHandler : HttpMessageHandler
     {
         protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(data).AsTask();
         protected override bool TryComputeLength(out long length) { length = 0; return false; }
+
+        /// <summary>
+        /// Returns the body without buffering it first, since buffering would make the base class report a length.
+        /// </summary>
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new MemoryStream(data, writable: false));
     }
 }
 

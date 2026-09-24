@@ -91,6 +91,89 @@ public class GitHubReleaseClientTests
     }
 
     /// <summary>
+    /// A <c>206</c> whose <c>Content-Range</c> reports an unknown total (<c>bytes N-M/*</c>) must derive the total from
+    /// the end of the served range, not report the partial body's own length as the whole asset's.
+    /// </summary>
+    [Fact]
+    public async Task OpenAssetStreamAsync_PartialResponseWithUnknownTotal_DerivesTotalFromRangeEnd()
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", [1, 2, 3, 4, 5], reportTotalLength: false);
+        using var client = TestData.Client(handler);
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 5, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.True(stream.IsPartial);
+        Assert.Equal(3, stream.ContentLength);
+        Assert.Equal(5, stream.TotalLength);
+    }
+
+    /// <summary>
+    /// A <c>206</c> with an unknown total and no <c>Content-Length</c> (a chunked body) must still derive the total
+    /// from the end of the served range instead of losing it.
+    /// </summary>
+    [Fact]
+    public async Task OpenAssetStreamAsync_PartialResponseWithUnknownTotalAndNoContentLength_DerivesTotalFromRangeEnd()
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", [1, 2, 3, 4, 5], reportTotalLength: false, includeLength: false);
+        using var client = TestData.Client(handler);
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 5, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.True(stream.IsPartial);
+        Assert.Null(stream.ContentLength);
+        Assert.Equal(5, stream.TotalLength);
+    }
+
+    /// <summary>
+    /// A <c>206</c> with an unknown total for an asset of unknown size can't be proven to run to the end of the asset
+    /// (the server may have served a short range), so the client must fall back to a full, non-partial download
+    /// instead of trusting the implied total.
+    /// </summary>
+    [Theory]
+    [InlineData(null)] // range runs to the end: still unprovable
+    [InlineData(3L)] // short range: implied total 4 of 5
+    public async Task OpenAssetStreamAsync_PartialResponseWithUnknownTotalAndUnknownAssetSize_FallsBackToFullDownload(long? rangeEnd)
+    {
+        byte[] full = [1, 2, 3, 4, 5];
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full, reportTotalLength: false, rangeEnd: rangeEnd);
+        using var client = TestData.Client(handler);
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 0, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.False(stream.IsPartial);
+        Assert.Equal(0, stream.RangeStart);
+        Assert.Equal(full.Length, stream.TotalLength);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[1].Headers.Range);
+    }
+
+    /// <summary>
+    /// A <c>206</c> with an unknown total whose implied total differs from the asset's size (the asset changed since
+    /// the partial file was written, or the server served less than the rest of it) can't safely be appended, so the
+    /// client must fall back to a full, non-partial download.
+    /// </summary>
+    [Theory]
+    [InlineData(new byte[] { 1, 2, 3, 4, 5, 6, 7 }, null)] // asset grew: implied total 7
+    [InlineData(new byte[] { 1, 2, 3, 4, 5 }, 3L)] // short range: implied total 4
+    public async Task OpenAssetStreamAsync_PartialResponseWithUnknownTotalNotMatchingAssetSize_FallsBackToFullDownload(byte[] served, long? rangeEnd)
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", served, reportTotalLength: false, rangeEnd: rangeEnd);
+        using var client = TestData.Client(handler);
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 5, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.False(stream.IsPartial);
+        Assert.Equal(0, stream.RangeStart);
+        Assert.Equal(served.Length, stream.TotalLength);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[1].Headers.Range);
+    }
+
+    /// <summary>
     /// A <c>206</c> whose <c>Content-Range</c> is missing or doesn't start at the requested offset can't be appended
     /// to the partial file, so the client must fall back to a full, non-partial download instead of returning it.
     /// </summary>

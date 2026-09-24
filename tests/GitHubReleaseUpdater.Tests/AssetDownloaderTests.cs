@@ -134,6 +134,26 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal([4], resumedClient.RequestedRangeStarts);
     }
 
+    /// <summary>
+    /// Resuming through <see cref="GitHubReleaseClient"/> against a server whose <c>206</c> reports an unknown total
+    /// (<c>bytes N-M/*</c>) must complete instead of being mistaken for a truncated download.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_ResumeWithUnknownContentRangeTotal_Completes()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+        var crashingClient = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 4 };
+        await Assert.ThrowsAsync<HttpRequestException>(() => new AssetDownloader(crashingClient) { MaxRetryAttempts = 0 }.DownloadAsync(asset, _dir));
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full, reportTotalLength: false);
+        using var client = TestData.Client(handler);
+
+        var path = await new AssetDownloader(client) { MaxRetryAttempts = 0 }.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal(4, handler.Requests.Single().Headers.Range!.Ranges.Single().From);
+    }
+
     [Fact]
     public async Task Resumes_even_when_overwrite_is_disabled()
     {
