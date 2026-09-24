@@ -296,11 +296,24 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         var isRateLimited = response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests
                             && (remaining == "0" || (apiMessage?.Contains("rate limit", StringComparison.OrdinalIgnoreCase) ?? false));
 
+        // Retry-After takes precedence: GitHub sends it for secondary rate limits, where X-RateLimit-Reset (the
+        // primary quota's window) can be up to an hour later than when retrying is actually allowed.
         DateTimeOffset? resetAt = null;
-        if (long.TryParse(GetHeader(response, "X-RateLimit-Reset"), NumberStyles.None, CultureInfo.InvariantCulture, out var epoch))
-            resetAt = DateTimeOffset.FromUnixTimeSeconds(epoch);
-        else if (response.Headers.RetryAfter?.Delta is { } delta)
+        if (response.Headers.RetryAfter?.Delta is { } delta)
+        {
             resetAt = DateTimeOffset.UtcNow + delta;
+        }
+        else if (response.Headers.RetryAfter?.Date is { } date)
+        {
+            // Measure the wait against the server's own clock (Date header) so client clock skew can't produce a
+            // reset time that has already passed, and never report one earlier than now.
+            var serverNow = response.Headers.Date ?? DateTimeOffset.UtcNow;
+            resetAt = DateTimeOffset.UtcNow + (date > serverNow ? date - serverNow : TimeSpan.Zero);
+        }
+        else if (long.TryParse(GetHeader(response, "X-RateLimit-Reset"), NumberStyles.None, CultureInfo.InvariantCulture, out var epoch))
+        {
+            resetAt = DateTimeOffset.FromUnixTimeSeconds(epoch);
+        }
 
         var message = response.StatusCode switch
         {
