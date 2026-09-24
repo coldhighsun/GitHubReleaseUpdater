@@ -42,8 +42,22 @@ internal static class Cli
         }
 
         var command = args[0];
+        if (command is not ("check" or "download"))
+        {
+            Console.Error.WriteLine($"Unknown command '{command}'.");
+            Console.Error.WriteLine(Usage);
+            return 2;
+        }
+
         var opts = ParseArgs(args.Skip(1));
 
+        // Validate everything up front so a bad invocation fails before any network call.
+        var outDir = command == "download" ? Require(opts, "out") : null;
+        if (outDir is not null && !IsValidPath(outDir))
+        {
+            Console.Error.WriteLine($"--out '{outDir}' is not a valid directory path.");
+            return 2;
+        }
         var owner = Require(opts, "owner");
         var repo = Require(opts, "repo");
         var current = Require(opts, "current");
@@ -53,6 +67,14 @@ internal static class Cli
             return 2;
         }
 
+        Uri? baseUrl = null;
+        if (opts.TryGetValue("base-url", out var b) && b is not null && !Uri.TryCreate(b, UriKind.Absolute, out baseUrl))
+        {
+            Console.Error.WriteLine($"--base-url '{b}' is not a valid absolute URL.");
+            return 2;
+        }
+
+        var tagPrefix = opts.GetValueOrDefault("tag-prefix");
         var token = opts.GetValueOrDefault("token") ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         IChecksumProvider? checksums = null;
         if (opts.ContainsKey("no-verify")) checksums = NoChecksumProvider.Instance;
@@ -64,10 +86,10 @@ internal static class Cli
             Repo = repo,
             CurrentVersion = currentVersion,
             Token = token,
-            BaseUrl = opts.TryGetValue("base-url", out var b) && b is not null ? new Uri(b) : null,
+            BaseUrl = baseUrl,
             IncludePrerelease = opts.ContainsKey("prerelease"),
-            TagPrefix = opts.GetValueOrDefault("tag-prefix"),
-            AssetSelector = opts.TryGetValue("asset", out var pattern) && pattern is not null ? new PatternAssetSelector(pattern) : null,
+            TagPrefix = tagPrefix,
+            AssetSelector = opts.TryGetValue("asset", out var pattern) && pattern is not null ? new PatternAssetSelector(pattern, tagPrefix: tagPrefix) : null,
             ChecksumProvider = checksums,
             RequireChecksum = opts.ContainsKey("require-checksum"),
             UserAgent = "GitHubReleaseUpdater.Cli",
@@ -111,15 +133,11 @@ internal static class Cli
                 Console.WriteLine(check.ReleaseNotes.Trim());
             }
 
-            if (command == "check") return 0;
-            if (command != "download")
+            if (outDir is null)
             {
-                Console.Error.WriteLine($"Unknown command '{command}'.");
-                Console.Error.WriteLine(Usage);
-                return 2;
+                return 0;
             }
 
-            var outDir = Require(opts, "out");
             Console.WriteLine();
             var download = await updater.DownloadAsync(check, outDir, new ConsoleProgress(), cts.Token);
             Console.WriteLine();
@@ -140,6 +158,16 @@ internal static class Cli
         catch (UpdaterException ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+        catch (TimeoutException ex)
+        {
+            Console.Error.WriteLine($"Timed out: {ex.Message}");
+            return 1;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"File error: {ex.Message}");
             return 1;
         }
     }
@@ -183,6 +211,27 @@ internal static class Cli
         Console.Error.WriteLine(Usage);
         Environment.Exit(2);
         return string.Empty;
+    }
+
+    /// <summary>
+    /// True when <paramref name="path"/> contains no invalid path characters and can be resolved to a full path, so
+    /// a malformed <c>--out</c> is rejected up front instead of throwing from the download.
+    /// </summary>
+    private static bool IsValidPath(string path)
+    {
+        if (path.AsSpan().IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+        {
+            return false;
+        }
+        try
+        {
+            Path.GetFullPath(path);
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
