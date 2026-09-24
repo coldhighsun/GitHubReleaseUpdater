@@ -377,6 +377,36 @@ public class AssetDownloaderTests : IDisposable
         Assert.Empty(Directory.GetFiles(_dir));
     }
 
+    /// <summary>
+    /// The backoff must stay within what <see cref="Task.Delay(TimeSpan, CancellationToken)"/> accepts, however many
+    /// attempts have been made or however large the base delay is.
+    /// </summary>
+    [Theory]
+    [InlineData(1_000L, 40)]
+    [InlineData(long.MaxValue / TimeSpan.TicksPerMillisecond, 0)]
+    public void ExponentialDelay_result_exceeding_task_delay_limit_is_clamped(long baseDelayMs, int attempt)
+    {
+        var delay = AssetDownloader.ExponentialDelay(TimeSpan.FromMilliseconds(baseDelayMs), attempt);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(uint.MaxValue - 1), delay);
+        _ = Task.Delay(delay, new CancellationToken(canceled: true)); // Throws ArgumentOutOfRangeException if out of range.
+    }
+
+    /// <summary>
+    /// A zero base delay must stay zero even when <c>2^attempt</c> overflows to infinity (where <c>0 * infinity</c>
+    /// would otherwise be NaN).
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1_024)]
+    [InlineData(int.MaxValue)]
+    public void ExponentialDelay_zero_base_delay_returns_zero(int attempt)
+    {
+        var delay = AssetDownloader.ExponentialDelay(TimeSpan.Zero, attempt);
+
+        Assert.Equal(TimeSpan.Zero, delay);
+    }
+
     [Fact]
     public async Task Cancelling_while_waiting_for_the_per_path_lock_does_not_leak_the_lock_entry()
     {

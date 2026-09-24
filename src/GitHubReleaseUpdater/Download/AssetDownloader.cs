@@ -462,14 +462,25 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
-    /// Doubles <paramref name="baseDelay"/> per <paramref name="attempt"/>, clamped to <see cref="TimeSpan.MaxValue"/>
-    /// instead of overflowing when a large <paramref name="attempt"/> and/or <paramref name="baseDelay"/> would
-    /// otherwise push the result past what <see cref="TimeSpan"/> can represent.
+    /// Longest delay <see cref="Task.Delay(TimeSpan, CancellationToken)"/> accepts (<see cref="uint.MaxValue"/> - 1
+    /// milliseconds, about 49.7 days); anything longer makes it throw <see cref="ArgumentOutOfRangeException"/>.
     /// </summary>
-    private static TimeSpan ExponentialDelay(TimeSpan baseDelay, int attempt)
+    private static readonly TimeSpan MaxTaskDelay = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
+    /// <summary>
+    /// Doubles <paramref name="baseDelay"/> per <paramref name="attempt"/>, clamped to <see cref="MaxTaskDelay"/> so a
+    /// large <paramref name="attempt"/> and/or <paramref name="baseDelay"/> neither overflows <see cref="TimeSpan"/>
+    /// nor exceeds what <see cref="Task.Delay(TimeSpan, CancellationToken)"/> accepts.
+    /// </summary>
+    internal static TimeSpan ExponentialDelay(TimeSpan baseDelay, int attempt)
     {
+        // A zero base stays zero; without this, 0 * 2^attempt is NaN once 2^attempt overflows to infinity.
+        if (baseDelay <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
         var ticks = baseDelay.Ticks * Math.Pow(2, attempt);
-        return ticks >= TimeSpan.MaxValue.Ticks ? TimeSpan.MaxValue : TimeSpan.FromTicks((long)ticks);
+        return ticks >= MaxTaskDelay.Ticks ? MaxTaskDelay : TimeSpan.FromTicks((long)ticks);
     }
 
     /// <summary>
