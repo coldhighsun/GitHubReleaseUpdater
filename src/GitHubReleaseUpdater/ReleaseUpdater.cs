@@ -245,7 +245,8 @@ public sealed class ReleaseUpdater : IDisposable
             actual = await FileHasher.Sha256Async(path, cancellationToken).ConfigureAwait(false);
             if (expected is not null && !FileHasher.HashEquals(expected, actual))
             {
-                File.Delete(path);
+                // A failed delete must not hide the mismatch, which is the error the caller needs to see.
+                TryDelete(path);
                 throw new ChecksumMismatchException(path, expected, actual);
             }
         }
