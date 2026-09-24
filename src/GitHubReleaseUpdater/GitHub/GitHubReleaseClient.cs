@@ -170,6 +170,13 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(rangeStart);
         var request = CreateAssetRequest(asset, rangeStart);
         var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (IsMisalignedPartialResponse(response, rangeStart, asset.Size))
+        {
+            // Appending a body that doesn't start at rangeStart would silently corrupt the resumed file, so fall
+            // back to the full asset, which callers already handle like a server that ignored the Range header.
+            response.Dispose();
+            return await OpenAssetStreamAsync(asset, rangeStart: 0, cancellationToken).ConfigureAwait(false);
+        }
         try
         {
             await EnsureSuccessAsync(response, allowNotFound: false, cancellationToken).ConfigureAwait(false);
@@ -183,6 +190,24 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
             response.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// True when <paramref name="response"/> is a <c>206 Partial Content</c> to a range request for
+    /// <paramref name="rangeStart"/> whose <c>Content-Range</c> is missing, isn't in bytes, starts at a different
+    /// offset, or reports a total length other than <paramref name="assetSize"/> (when that is known).
+    /// </summary>
+    private static bool IsMisalignedPartialResponse(HttpResponseMessage response, long rangeStart, long assetSize)
+    {
+        if (rangeStart <= 0 || response.StatusCode != HttpStatusCode.PartialContent)
+        {
+            return false;
+        }
+        var range = response.Content.Headers.ContentRange;
+        return range is null
+               || !string.Equals(range.Unit, "bytes", StringComparison.OrdinalIgnoreCase)
+               || range.From != rangeStart
+               || (assetSize > 0 && range.Length is { } length && length != assetSize);
     }
 
     /// <inheritdoc />
