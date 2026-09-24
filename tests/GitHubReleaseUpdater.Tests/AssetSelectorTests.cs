@@ -97,6 +97,45 @@ public class AssetSelectorTests
         Assert.Equal("app-win-x64.exe", new RuntimeAssetSelector(new RuntimeInfo("win", "x64"), "exe").Select(release)?.Name);
     }
 
+    /// <summary>
+    /// Preferred extensions are matched case-insensitively, with or without the leading dot.
+    /// </summary>
+    [Theory]
+    [InlineData(".EXE")]
+    [InlineData("Exe")]
+    public void Select_PreferredExtensionInDifferentCase_StillMatches(string extension)
+    {
+        var release = TestData.Release("v1", "app-win-x64.zip", "app-win-x64.exe");
+
+        var selected = new RuntimeAssetSelector(new RuntimeInfo("win", "x64"), extension).Select(release);
+
+        Assert.Equal("app-win-x64.exe", selected?.Name);
+    }
+
+    /// <summary>
+    /// A null extensions array is rejected up front.
+    /// </summary>
+    [Fact]
+    public void Constructor_NullPreferredExtensions_ThrowsArgumentNullException()
+    {
+        Assert.Throws<ArgumentNullException>(() => new RuntimeAssetSelector(new RuntimeInfo("win", "x64"), null!));
+    }
+
+    /// <summary>
+    /// A null or blank entry in the extensions array is rejected with an <see cref="ArgumentException"/> rather than
+    /// surfacing as a <see cref="NullReferenceException"/> from inside the constructor.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Constructor_NullOrBlankPreferredExtension_ThrowsArgumentException(string? extension)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => new RuntimeAssetSelector(new RuntimeInfo("win", "x64"), ".zip", extension!));
+
+        Assert.Equal("preferredExtensions", ex.ParamName);
+    }
+
     [Fact]
     public void Pattern_selector_expands_placeholders()
     {
