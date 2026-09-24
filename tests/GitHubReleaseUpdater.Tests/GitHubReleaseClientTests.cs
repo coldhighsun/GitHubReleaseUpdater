@@ -1,5 +1,6 @@
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
+using GitHubReleaseUpdater.GitHub.Models;
 using System.Net;
 
 namespace GitHubReleaseUpdater.Tests;
@@ -75,7 +76,7 @@ public class GitHubReleaseClientTests
     {
         var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", [1, 2, 3, 4, 5]);
         using var client = TestData.Client(handler);
-        var asset = TestData.Release("v1", "a.zip").Assets[0];
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 5, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
 
         await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
 
@@ -87,6 +88,51 @@ public class GitHubReleaseClientTests
         Assert.Equal(3, await stream.Stream.ReadAtLeastAsync(buf, 3));
         Assert.Equal([3, 4, 5], buf);
         Assert.Equal(2, handler.Requests[0].Headers.Range!.Ranges.Single().From);
+    }
+
+    /// <summary>
+    /// A <c>206</c> whose <c>Content-Range</c> is missing or doesn't start at the requested offset can't be appended
+    /// to the partial file, so the client must fall back to a full, non-partial download instead of returning it.
+    /// </summary>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(1L)]
+    [InlineData(null)]
+    public async Task OpenAssetStreamAsync_partial_response_starts_at_wrong_offset_falls_back_to_full_download(long? reportedFrom)
+    {
+        byte[] full = [1, 2, 3, 4, 5];
+        var handler = new StubHttpHandler().OnMisalignedRangeBytes("/releases/assets/1", full, reportedFrom);
+        using var client = TestData.Client(handler);
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.False(stream.IsPartial);
+        Assert.Equal(0, stream.RangeStart);
+        var buf = new byte[full.Length];
+        Assert.Equal(full.Length, await stream.Stream.ReadAtLeastAsync(buf, full.Length));
+        Assert.Equal(full, buf);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[1].Headers.Range);
+    }
+
+    /// <summary>
+    /// A 206 whose <c>Content-Range</c> starts at the requested offset but reports a total length different from the
+    /// asset's size belongs to a different revision of the file, so it must not be appended to the partial download.
+    /// </summary>
+    [Fact]
+    public async Task OpenAssetStreamAsync_partial_response_total_length_differs_from_asset_size_falls_back_to_full_download()
+    {
+        byte[] full = [1, 2, 3, 4, 5];
+        var handler = new StubHttpHandler().OnMisalignedRangeBytes("/releases/assets/1", full, reportedFrom: 2, reportedLength: 5_000);
+        using var client = TestData.Client(handler);
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        Assert.False(stream.IsPartial);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[1].Headers.Range);
     }
 
     [Fact]

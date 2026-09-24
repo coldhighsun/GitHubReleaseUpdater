@@ -76,6 +76,30 @@ internal sealed class StubHttpHandler : HttpMessageHandler
         return this;
     }
 
+    /// <summary>
+    /// Serves <paramref name="fullBody"/> like a misbehaving server: a request carrying a <c>Range</c> header gets
+    /// back <c>206 Partial Content</c> whose body is the whole asset from byte 0 and whose <c>Content-Range</c>
+    /// starts at <paramref name="reportedFrom"/> (omitted when null) instead of the requested offset; a request
+    /// without one gets the full body as a normal <c>200 OK</c>.
+    /// </summary>
+    public StubHttpHandler OnMisalignedRangeBytes(string urlContains, byte[] fullBody, long? reportedFrom, long? reportedLength = null)
+    {
+        _routes.Add((r => r.RequestUri!.ToString().Contains(urlContains, StringComparison.Ordinal), r =>
+        {
+            if (r.Headers.Range is null)
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fullBody) };
+            }
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(fullBody) };
+            if (reportedFrom is { } from)
+            {
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(from, fullBody.Length - 1, reportedLength ?? fullBody.Length);
+            }
+            return response;
+        }));
+        return this;
+    }
+
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Requests.Add(request);
