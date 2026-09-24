@@ -342,6 +342,25 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.True(result.IsUpdateAvailable);
     }
 
+    /// <summary>
+    /// A stored last-check time in the future (e.g. the system clock was moved back) must not throttle checks until
+    /// the clock catches up.
+    /// </summary>
+    [Fact]
+    public async Task CheckForUpdateAsync_last_checked_at_is_in_the_future_is_not_throttled()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", "app-win-x64.zip") };
+        var store = new InMemoryLastCheckStore();
+        await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow + TimeSpan.FromDays(30));
+        var options = Options("1.0.0", lastCheckStore: store, minimumCheckInterval: TimeSpan.FromHours(24));
+        using var updater = new ReleaseUpdater(options, client);
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Throttled);
+        Assert.True(result.IsUpdateAvailable);
+    }
+
     [Fact]
     public async Task BypassThrottle_hits_the_api_even_within_the_minimum_interval()
     {
