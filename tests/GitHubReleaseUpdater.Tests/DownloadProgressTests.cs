@@ -67,4 +67,22 @@ public class DownloadProgressTests
         var p = new DownloadProgress(1000, 2000, TimeSpan.FromSeconds(2));
         Assert.Equal(TimeSpan.FromSeconds(2), p.EstimatedRemaining);
     }
+
+    /// <summary>
+    /// Bytes carried over from an earlier attempt were not transferred during <see cref="DownloadProgress.Elapsed"/>,
+    /// so they must not inflate throughput or shrink the ETA.
+    /// </summary>
+    [Fact]
+    public void BytesPerSecond_resumed_bytes_set_excludes_them_from_throughput_and_eta()
+    {
+        // 1500 received, 1000 of them resumed -> 500 bytes in 1 second; 500 bytes remaining -> 1 second.
+        var p = new DownloadProgress(1500, 2000, TimeSpan.FromSeconds(1)) { ResumedBytes = 1000 };
+
+        var speed = p.BytesPerSecond;
+        var eta = p.EstimatedRemaining;
+
+        Assert.Equal(500, speed);
+        Assert.Equal(TimeSpan.FromSeconds(1), eta);
+        Assert.Equal(75.0, p.Percentage);
+    }
 }

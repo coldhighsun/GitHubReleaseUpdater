@@ -153,6 +153,30 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal([4], resumedClient.RequestedRangeStarts);
     }
 
+    /// <summary>
+    /// Progress for a resumed transfer reports the carried-over bytes as <see cref="DownloadProgress.ResumedBytes"/>
+    /// so throughput and ETA reflect only what this transfer actually moved; a fresh transfer reports 0.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_resumed_transfer_reports_resumed_bytes_in_progress()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        var asset = new GitHubAsset { Name = "a.bin", Size = full.Length };
+        var crashingClient = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 4 };
+        var crashingReports = new List<DownloadProgress>();
+        await Assert.ThrowsAsync<HttpRequestException>(() => new AssetDownloader(crashingClient) { MaxRetryAttempts = 0 }
+            .DownloadAsync(asset, _dir, progress: new SyncProgress(crashingReports)));
+        var reports = new List<DownloadProgress>();
+
+        await new AssetDownloader(new ResumableAssetClient { FullBytes = full })
+            .DownloadAsync(asset, _dir, progress: new SyncProgress(reports));
+
+        Assert.All(crashingReports, r => Assert.Equal(0, r.ResumedBytes));
+        Assert.All(reports, r => Assert.Equal(4, r.ResumedBytes));
+        Assert.Equal(4, reports[0].BytesReceived);
+        Assert.Equal(full.Length, reports[^1].BytesReceived);
+    }
+
     [Fact]
     public async Task Allow_resume_false_ignores_existing_partial_file_and_restarts_from_zero()
     {
