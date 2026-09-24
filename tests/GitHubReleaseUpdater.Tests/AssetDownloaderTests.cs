@@ -27,7 +27,7 @@ public class AssetDownloaderTests : IDisposable
         Random.Shared.NextBytes(data);
         var client = new FakeReleaseClient();
         client.AssetBytes["a.bin"] = data;
-        var asset = TestData.Release("v1", "a.bin").Assets[0];
+        var asset = TestData.Release("v1", data.Length, "a.bin").Assets[0];
         var reports = new List<DownloadProgress>();
         var downloader = new AssetDownloader(client) { BufferSize = 4096, ProgressInterval = TimeSpan.Zero };
 
@@ -152,6 +152,24 @@ public class AssetDownloaderTests : IDisposable
 
         Assert.Equal(full, await File.ReadAllBytesAsync(path));
         Assert.Equal(4, handler.Requests.Single().Headers.Range!.Ranges.Single().From);
+    }
+
+    /// <summary>
+    /// A body whose reported total differs from the release's listed size is a different revision of the asset or a
+    /// broken response, so the download must fail without creating the partial or finalizing the file.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_ServerTotalDiffersFromAssetSize_ThrowsAndDoesNotFinalize()
+    {
+        var client = new FakeReleaseClient();
+        client.AssetBytes["a.bin"] = [1, 2, 3];
+        var asset = new GitHubAsset { Name = "a.bin", Size = 5 };
+
+        var ex = await Assert.ThrowsAsync<UpdaterException>(() => new AssetDownloader(client) { MaxRetryAttempts = 0 }.DownloadAsync(asset, _dir));
+
+        Assert.Contains("size mismatch", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(Path.Combine(_dir, "a.bin")));
+        Assert.False(File.Exists(Path.Combine(_dir, "a.bin.partial")));
     }
 
     [Fact]

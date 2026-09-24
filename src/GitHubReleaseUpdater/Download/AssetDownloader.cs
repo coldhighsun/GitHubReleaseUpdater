@@ -75,7 +75,8 @@ public sealed class AssetDownloader
 
     /// <summary>
     /// Extra attempts made after a failed download before giving up, applied per <see cref="DownloadAsync"/> call.
-    /// A transient failure (network I/O error, request timeout, a truncated body, or a GitHub 5xx/429/408 response)
+    /// A transient failure (network I/O error, request timeout, a truncated body or one whose size differs from the
+    /// release's listed size, or a GitHub 5xx/429/408 response)
     /// is retried with exponential backoff starting at <see cref="RetryDelay"/> and doubling each attempt; a
     /// checksum mismatch, disk error, invalid argument, or caller cancellation is never retried. Default 2 (3
     /// attempts total).
@@ -170,6 +171,13 @@ public sealed class AssetDownloader
                     var verifiedLength = AllowResume ? PartialMatchesAsset(partialPath, metaPath, asset) : null;
                     var resumeFrom = verifiedLength ?? 0;
                     await using var source = await _client.OpenAssetStreamAsync(asset, resumeFrom, cancellationToken).ConfigureAwait(false);
+                    // The release's listed size is authoritative, so a body whose total differs is a different
+                    // revision of the asset or a broken response; fail before touching the partial file instead of
+                    // finalizing it.
+                    if (asset.Size > 0 && source.TotalLength is { } serverTotal && serverTotal != asset.Size)
+                    {
+                        throw new UpdaterException($"Asset size mismatch: the release lists {asset.Size} bytes but the server reported {serverTotal}.");
+                    }
                     var resuming = resumeFrom > 0 && source.IsPartial;
                     var initialReceived = resuming ? resumeFrom : 0L;
                     var total = source.TotalLength ?? (asset.Size > 0 ? asset.Size : null);
@@ -427,7 +435,7 @@ public sealed class AssetDownloader
     /// <summary>
     /// True for exceptions worth retrying: transport-level failures (<see cref="HttpRequestException"/> and
     /// <see cref="System.Net.Http.HttpIOException"/>, the latter thrown when the response body stream breaks
-    /// mid-transfer, e.g. a reset connection), request timeouts, a truncated body (an exact
+    /// mid-transfer, e.g. a reset connection), request timeouts, a truncated or wrongly sized body (an exact
     /// <see cref="UpdaterException"/>, not one of its subclasses such as <see cref="ChecksumMismatchException"/>),
     /// and a <see cref="GitHubApiException"/> carrying a transient GitHub status code (408, 429, or 5xx).
     /// Deliberately excludes plain <see cref="IOException"/> so local disk errors (full disk, locked file) writing
