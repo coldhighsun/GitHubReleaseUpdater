@@ -40,6 +40,17 @@ public sealed class GitHubApiException : UpdaterException
     }
 
     /// <summary>
+    /// Creates an instance for a failure that happened after GitHub answered with <paramref name="statusCode"/>
+    /// (e.g. an unparseable body on a successful response), so the real status is reported rather than a default.
+    /// </summary>
+    public GitHubApiException(string message, HttpStatusCode statusCode, Exception? innerException)
+        : base(message, innerException)
+    {
+        StatusCode = statusCode;
+        ResponseBody = string.Empty;
+    }
+
+    /// <summary>
     /// Creates a new instance.
     /// </summary>
     public GitHubApiException(string message, HttpStatusCode statusCode, bool isRateLimited, DateTimeOffset? rateLimitResetAt, string responseBody)
