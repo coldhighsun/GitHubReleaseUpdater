@@ -268,6 +268,26 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.False(File.Exists(ex.FilePath));
     }
 
+    /// <summary>
+    /// A corrupt download must not destroy a previously downloaded file at the same destination.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_ChecksumMismatch_LeavesExistingFileUntouched()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", 3, "app-win-x64.zip") };
+        client.AssetBytes["app-win-x64.zip"] = [1, 2, 3];
+        using var updater = new ReleaseUpdater(Options("1.0.0", checksums: new StaticChecksumProvider(new string('f', 64))), client);
+        Directory.CreateDirectory(_dir);
+        var existing = Path.Combine(_dir, "app-win-x64.zip");
+        await File.WriteAllBytesAsync(existing, [7, 7, 7]);
+
+        var check = await updater.CheckForUpdateAsync();
+        await Assert.ThrowsAsync<ChecksumMismatchException>(() => updater.DownloadAsync(check, _dir));
+
+        Assert.Equal([7, 7, 7], await File.ReadAllBytesAsync(existing));
+        Assert.False(File.Exists(existing + ".partial"));
+    }
+
     [Fact]
     public async Task Download_without_checksum_is_unverified_unless_required()
     {

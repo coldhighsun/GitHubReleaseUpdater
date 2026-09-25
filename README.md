@@ -149,7 +149,7 @@ When a download is interrupted — whether it's about to be retried, or the proc
 
 - Streams to `<name>.partial`, then renames atomically. With `DownloadAllowResume = true` (the default) a failed download leaves the partial file (and its `.meta` sidecar) in place so a later attempt can resume it — only a caller-cancelled download always cleans it up. With `DownloadAllowResume = false`, no partial file is left behind on any failure or cancellation.
 - Throws `UpdaterException` if the server reported a Content-Length that does not match the bytes received.
-- When an expected hash can be resolved the file is verified; on mismatch it is deleted and `ChecksumMismatchException` is thrown. When no hash is available `DownloadResult.Verified` is `false` (set `RequireChecksum = true` to fail instead — it fails before any bytes are transferred).
+- When an expected hash can be resolved the file is verified before it is moved into place; on mismatch the download is discarded (any existing file at the destination is left untouched) and `ChecksumMismatchException` is thrown, its `FilePath` naming the discarded `.partial`. When no hash is available `DownloadResult.Verified` is `false` (set `RequireChecksum = true` to fail instead — it fails before any bytes are transferred).
 - Private repository assets are downloaded via the API endpoint with `Accept: application/octet-stream`; just supply a token.
 
 ### Exceptions
@@ -346,7 +346,7 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 
 - 流式写入 `<name>.partial`，完成后原子重命名。`DownloadAllowResume = true`（默认）时，失败的下载会保留部分文件（及其 `.meta` 侧车文件），以便之后的尝试续传——只有调用方主动取消才会始终清理掉它。`DownloadAllowResume = false` 时，任何失败或取消都不会残留部分文件。
 - 服务器报告了 Content-Length 但字节数不符时抛 `UpdaterException`。
-- 能解析到期望哈希时进行校验，不匹配则删除文件并抛 `ChecksumMismatchException`；无法解析到哈希时 `DownloadResult.Verified = false`（设置 `RequireChecksum = true` 可改为直接失败，且在传输前就会失败）。
+- 能解析到期望哈希时进行校验，校验在文件移动到目标位置之前进行，不匹配则丢弃本次下载（目标位置已有的文件保持不变）并抛 `ChecksumMismatchException`，其 `FilePath` 为被丢弃的 `.partial` 路径；无法解析到哈希时 `DownloadResult.Verified = false`（设置 `RequireChecksum = true` 可改为直接失败，且在传输前就会失败）。
 - 私有仓库资产通过 API 端点 + `Accept: application/octet-stream` 下载，只要提供 Token 即可。
 
 ### 异常

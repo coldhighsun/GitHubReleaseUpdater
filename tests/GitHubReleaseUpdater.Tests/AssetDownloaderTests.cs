@@ -42,6 +42,49 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal(100, reports[^1].Percentage);
     }
 
+    /// <summary>
+    /// A checksum mismatch must be detected before the move, so an existing good file survives, no partial is left
+    /// to resume from, and the doomed download is not retried.
+    /// </summary>
+    [Fact]
+    public async Task DownloadVerifiedAsync_ChecksumMismatch_KeepsExistingFileAndDoesNotRetry()
+    {
+        var client = new FlakyAssetClient { Bytes = [1, 2, 3] };
+        var asset = TestData.Release("v1", 3, "a.bin").Assets[0];
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
+        Directory.CreateDirectory(_dir);
+        var finalPath = Path.Combine(_dir, "a.bin");
+        await File.WriteAllBytesAsync(finalPath, [9, 9]);
+        var expected = new string('f', 64);
+
+        var ex = await Assert.ThrowsAsync<ChecksumMismatchException>(() => downloader.DownloadVerifiedAsync(asset, _dir, expected, null, CancellationToken.None));
+
+        Assert.Equal(finalPath + ".partial", ex.FilePath);
+        Assert.Equal(expected, ex.Expected);
+        Assert.Equal([9, 9], await File.ReadAllBytesAsync(finalPath));
+        Assert.False(File.Exists(finalPath + ".partial"));
+        Assert.False(File.Exists(finalPath + ".partial.meta"));
+        Assert.Equal(1, client.Attempts);
+    }
+
+    /// <summary>
+    /// A matching checksum finalizes the file and returns the hash computed from the downloaded bytes.
+    /// </summary>
+    [Fact]
+    public async Task DownloadVerifiedAsync_ChecksumMatches_ReturnsPathAndHash()
+    {
+        byte[] data = [1, 2, 3];
+        var client = new FlakyAssetClient { Bytes = data };
+        var asset = TestData.Release("v1", data.Length, "a.bin").Assets[0];
+        var expected = Convert.ToHexStringLower(SHA256.HashData(data));
+
+        var (path, sha256) = await new AssetDownloader(client).DownloadVerifiedAsync(asset, _dir, expected, null, CancellationToken.None);
+
+        Assert.Equal(Path.Combine(_dir, "a.bin"), path);
+        Assert.Equal(expected, sha256, ignoreCase: true);
+        Assert.Equal(data, await File.ReadAllBytesAsync(path));
+    }
+
     [Fact]
     public async Task Unknown_length_still_completes()
     {
