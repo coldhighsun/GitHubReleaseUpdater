@@ -565,6 +565,32 @@ public class AssetDownloaderTests : IDisposable
     }
 
     /// <summary>
+    /// An <see cref="OperationCanceledException"/> the caller didn't request (e.g. from
+    /// <c>HttpClient.CancelPendingRequests</c>) is an ordinary failure: it isn't retried, but the partial and its
+    /// checkpoint are kept so a later call can still resume.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_NonCallerCancellation_KeepsPartialAndDoesNotRetry()
+    {
+        var partial = new byte[] { 1, 2, 3 };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = 6, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+        Directory.CreateDirectory(_dir);
+        var partialPath = Path.Combine(_dir, "a.bin.partial");
+        var metaPath = partialPath + ".meta";
+        await File.WriteAllBytesAsync(partialPath, partial);
+        var tailHash = Convert.ToHexStringLower(MD5.HashData(partial));
+        await File.WriteAllTextAsync(metaPath, $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{partial.Length}:{tailHash}");
+        var client = new FlakyAssetClient { Bytes = [1], FailUntilAttempt = 1, ExceptionFactory = () => new OperationCanceledException() };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.Equal(1, client.Attempts);
+        Assert.Equal(partial, await File.ReadAllBytesAsync(partialPath));
+        Assert.True(File.Exists(metaPath));
+    }
+
+    /// <summary>
     /// A body that stops delivering data mid-transfer must time out and be resumed from the checkpoint rather than
     /// hang the download forever.
     /// </summary>

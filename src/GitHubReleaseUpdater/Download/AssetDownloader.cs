@@ -330,7 +330,9 @@ public sealed class AssetDownloader
                     }
                     await DelayBeforeRetryAsync(attempt, partialPath, metaPath, cancellationToken).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException)
+                // Only the caller's own cancellation discards the partial; any other OperationCanceledException (e.g.
+                // HttpClient.CancelPendingRequests) is an ordinary failure below, so the partial stays resumable.
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     TryDelete(partialPath);
                     TryDelete(metaPath);
