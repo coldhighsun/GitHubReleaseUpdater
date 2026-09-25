@@ -528,6 +528,43 @@ public class AssetDownloaderTests : IDisposable
     }
 
     /// <summary>
+    /// A partial that can't be deleted keeps producing the same doomed Range request; the one extra restart a 416
+    /// earns past <see cref="AssetDownloader.MaxRetryAttempts"/> must not repeat, so the download fails instead of
+    /// looping forever.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_RangeRejectedAndPartialUndeletable_FailsAfterOneRestart()
+    {
+        var partial = new byte[] { 1, 2, 3 };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = 0, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+        Directory.CreateDirectory(_dir);
+        var partialPath = Path.Combine(_dir, "a.bin.partial");
+        var metaPath = partialPath + ".meta";
+        await File.WriteAllBytesAsync(partialPath, partial);
+        var tailHash = Convert.ToHexStringLower(MD5.HashData(partial));
+        await File.WriteAllTextAsync(metaPath, $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{partial.Length}:{tailHash}");
+        // Without the cap the download would keep looping; succeeding after a few attempts turns that into a
+        // failed assertion instead of a hung test.
+        var client = new FlakyAssetClient
+        {
+            Bytes = [9],
+            FailUntilAttempt = 5,
+            ExceptionFactory = () => new GitHubApiException("range not satisfiable", HttpStatusCode.RequestedRangeNotSatisfiable, false, null, string.Empty),
+        };
+        var downloader = new AssetDownloader(client) { MaxRetryAttempts = 0, RetryDelay = TimeSpan.Zero };
+
+        // Opening both files without FileShare.Delete makes TryDelete fail on Windows, as antivirus or backup
+        // software holding them would.
+        await using (new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        await using (new FileStream(metaPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            await Assert.ThrowsAsync<GitHubApiException>(() => downloader.DownloadAsync(asset, _dir));
+        }
+
+        Assert.Equal(2, client.Attempts);
+    }
+
+    /// <summary>
     /// A body that stops delivering data mid-transfer must time out and be resumed from the checkpoint rather than
     /// hang the download forever.
     /// </summary>
