@@ -187,6 +187,23 @@ public class CliTests
     }
 
     /// <summary>
+    /// The ETA keeps its hours instead of wrapping at 60 minutes.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 0, "00:00")]
+    [InlineData(0, 59, 59, "59:59")]
+    [InlineData(1, 5, 0, "1:05:00")]
+    [InlineData(27, 3, 9, "27:03:09")]
+    public void FormatEta_VariousDurations_IncludesHoursOnlyWhenNeeded(int hours, int minutes, int seconds, string expected)
+    {
+        var remaining = new TimeSpan(hours, minutes, seconds);
+
+        var formatted = Cli.FormatEta(remaining);
+
+        Assert.Equal(expected, formatted);
+    }
+
+    /// <summary>
     /// Runs the CLI against the stub handler and captured writers, with no ambient token unless
     /// <paramref name="defaultToken"/> is given.
     /// </summary>
