@@ -130,16 +130,20 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
     public static bool IsMetadataFile(string name)
     {
         var lower = name.ToLowerInvariant();
-        return lower.EndsWith(".sha256", StringComparison.Ordinal)
-            || lower.EndsWith(".sha512", StringComparison.Ordinal)
-            || lower.EndsWith(".sha1", StringComparison.Ordinal)
-            || lower.EndsWith(".md5", StringComparison.Ordinal)
-            || lower.EndsWith(".sig", StringComparison.Ordinal)
-            || lower.EndsWith(".asc", StringComparison.Ordinal)
-            || lower.EndsWith(".pem", StringComparison.Ordinal)
-            || lower.EndsWith(".sbom", StringComparison.Ordinal)
+        return MetadataSuffixes.Any(s => lower.EndsWith(s, StringComparison.Ordinal))
             || IsAggregateSumsFileName(lower);
     }
+
+    /// <summary>
+    /// Lowercase suffixes of checksum, signature, attestation and SBOM sidecar files. These are matched as whole
+    /// compound suffixes (e.g. <c>.sbom.json</c>, not <c>.json</c>) so ordinary JSON release assets stay selectable.
+    /// </summary>
+    private static readonly string[] MetadataSuffixes =
+    [
+        ".sha256", ".sha512", ".sha1", ".md5", ".sha256sum", ".sha512sum",
+        ".sig", ".asc", ".pem", ".minisig", ".p7s", ".sigstore", ".sigstore.json", ".intoto.jsonl",
+        ".sbom", ".sbom.json", ".spdx", ".spdx.json", ".cdx.json",
+    ];
 
     /// <summary>
     /// True when the (already lowercased) name is an exact known aggregate sums file name, or ends with one of

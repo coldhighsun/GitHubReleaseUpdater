@@ -44,6 +44,16 @@ public class AssetSelectorTests
     }
 
     [Fact]
+    public void Select_SbomListedBeforeBinary_PicksBinary()
+    {
+        var release = TestData.Release("v1", "app-linux-x64.tar.gz.sbom.json", "app-linux-x64.tar.gz.sigstore.json", "app-linux-x64.tar.gz");
+
+        var selected = new RuntimeAssetSelector(new RuntimeInfo("linux", "x64")).Select(release);
+
+        Assert.Equal("app-linux-x64.tar.gz", selected?.Name);
+    }
+
+    [Fact]
     public void Runtime_selector_still_picks_plain_txt_release_asset()
     {
         // A .txt file is only metadata when its name looks like a checksum/sums file (see IsMetadataFile tests below);
@@ -61,6 +71,14 @@ public class AssetSelectorTests
     [InlineData("app.asc", true)]
     [InlineData("app.pem", true)]
     [InlineData("app.sbom", true)]
+    [InlineData("app-linux-x64.tar.gz.sbom.json", true)]
+    [InlineData("app-linux-x64.spdx.json", true)]
+    [InlineData("app-linux-x64.cdx.json", true)]
+    [InlineData("app-linux-x64.tar.gz.intoto.jsonl", true)]
+    [InlineData("app-linux-x64.tar.gz.sigstore.json", true)]
+    [InlineData("app-linux-x64.tar.gz.minisig", true)]
+    [InlineData("app-linux-x64.tar.gz.sha256sum", true)]
+    [InlineData("app-linux-x64.json", false)]
     [InlineData("SHA256SUMS", true)]
     [InlineData("sha256sums.txt", true)]
     [InlineData("checksums.txt", true)]
