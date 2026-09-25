@@ -164,12 +164,15 @@ public sealed class AssetDownloader
 
             for (var attempt = 0; ; attempt++)
             {
+                // Whether this attempt sent a Range header, so a 416 for it can always fall back to a full restart.
+                var requestedRange = false;
                 try
                 {
                     // Resume eligibility depends only on AllowResume and the partial's verified checkpoint, never
                     // on overwrite (which governs replacing the already-completed final file, an unrelated concern).
                     var verifiedLength = AllowResume ? PartialMatchesAsset(partialPath, metaPath, asset) : null;
                     var resumeFrom = verifiedLength ?? 0;
+                    requestedRange = resumeFrom > 0;
                     await using var source = await _client.OpenAssetStreamAsync(asset, resumeFrom, cancellationToken).ConfigureAwait(false);
                     // The release's listed size is authoritative, so a body whose total differs is a different
                     // revision of the asset or a broken response; fail before touching the partial file instead of
@@ -221,11 +224,14 @@ public sealed class AssetDownloader
                 // A range that's no longer valid for this asset (e.g. it was regenerated with a smaller size between
                 // attempts) can never succeed by resuming again, so the partial is discarded unconditionally — even
                 // when AllowResume is true — so this and any later call restarts from 0 instead of failing forever.
+                // A rejected range (e.g. a complete partial of an asset whose size is unknown, so PartialMatchesAsset
+                // couldn't tell it was complete) always earns that one restart even past MaxRetryAttempts; the
+                // restart sends no Range header, so this can't loop.
                 catch (GitHubApiException ex) when (ex.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
                 {
                     TryDelete(partialPath);
                     TryDelete(metaPath);
-                    if (attempt >= MaxRetryAttempts)
+                    if (attempt >= MaxRetryAttempts && !requestedRange)
                     {
                         throw;
                     }
@@ -278,7 +284,8 @@ public sealed class AssetDownloader
     /// <summary>
     /// Returns the number of verified, resumable bytes at the start of <paramref name="partialPath"/> when it and
     /// its sidecar <paramref name="metaPath"/> exist, the marker's identity matches <paramref name="asset"/> (id
-    /// and size), and the checkpointed tail-hash of those bytes still matches what's on disk. Returns null (and
+    /// and size), the checkpointed tail-hash of those bytes still matches what's on disk, and the checkpoint stops
+    /// short of the asset's listed size (a complete one has no bytes left to range-request). Returns null (and
     /// deletes any stale sidecar/partial) for a missing partial, a missing/malformed/mismatched marker, an orphaned
     /// marker whose partial file is gone, a checkpoint whose tail bytes no longer hash to the recorded value, or an
     /// I/O error reading either file (e.g. transiently locked by antivirus/backup software) — resume is a best-effort
@@ -319,6 +326,14 @@ public sealed class AssetDownloader
             if (verifiedLength > actualLength)
             {
                 TryDelete(metaPath);
+                return null;
+            }
+
+            // A checkpoint covering the whole asset (e.g. the final rename failed or the process died just before
+            // it) leaves nothing to request: "Range: bytes={Size}-" is unsatisfiable and would only earn a 416, so
+            // restart from 0 instead.
+            if (asset.Size > 0 && verifiedLength >= asset.Size)
+            {
                 return null;
             }
 

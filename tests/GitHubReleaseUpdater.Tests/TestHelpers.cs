@@ -57,8 +57,9 @@ internal sealed class StubHttpHandler : HttpMessageHandler
     /// <summary>
     /// Serves <paramref name="fullBody"/> like a range-aware server: a request carrying a <c>Range: bytes=N-</c>
     /// header gets back <c>206 Partial Content</c> with <c>Content-Range: bytes N-{end}/{length}</c> and the tail
-    /// of the body from byte N; a request without one gets the full body as a normal <c>200 OK</c>. When
-    /// <paramref name="reportTotalLength"/> is false the total is sent as unknown (<c>bytes N-{end}/*</c>). The
+    /// of the body from byte N (or <c>416</c> when N is past the end); a request without one gets the full body as a
+    /// normal <c>200 OK</c>. When <paramref name="reportTotalLength"/> is false the total is sent as unknown
+    /// (<c>bytes N-{end}/*</c>). The
     /// partial body stops at <paramref name="rangeEnd"/> (inclusive) when given, like a server that serves less
     /// than was asked for, and omits <c>Content-Length</c> when <paramref name="includeLength"/> is false.
     /// </summary>
@@ -67,6 +68,10 @@ internal sealed class StubHttpHandler : HttpMessageHandler
         _routes.Add((r => r.RequestUri!.ToString().Contains(urlContains, StringComparison.Ordinal), r =>
         {
             var rangeStart = r.Headers.Range?.Ranges.FirstOrDefault()?.From;
+            if (rangeStart is { } from && from >= fullBody.Length)
+            {
+                return new HttpResponseMessage(HttpStatusCode.RequestedRangeNotSatisfiable);
+            }
             if (rangeStart is { } start && start > 0)
             {
                 var end = rangeEnd ?? fullBody.Length - 1;
