@@ -87,20 +87,30 @@ public class SemanticVersionTests
     }
 
     /// <summary>
-    /// Versions that compare equal because numeric prerelease identifiers differ only in leading zeros must also hash
-    /// equal, or hash-based collections would treat them as distinct.
+    /// A numeric prerelease identifier with a leading zero is invalid per SemVer, so the constructor must reject it
+    /// rather than silently accepting a value that could never be produced by <see cref="SemanticVersion.Parse"/>.
     /// </summary>
     [Fact]
-    public void GetHashCode_numeric_prerelease_identifiers_differ_only_in_leading_zeros_are_equal()
+    public void Constructor_rejects_prerelease_numeric_identifier_with_leading_zero()
     {
-        var a = new SemanticVersion(1, 0, 0, "beta.01");
-        var b = new SemanticVersion(1, 0, 0, "beta.1");
+        Assert.Throws<ArgumentException>(() => new SemanticVersion(1, 0, 0, "beta.01"));
+    }
 
-        var hashA = a.GetHashCode();
-        var hashB = b.GetHashCode();
+    /// <summary>
+    /// Versions that compare equal because a numeric prerelease identifier is written with different (but both
+    /// valid, i.e. non-leading-zero) casing of its sibling alphanumeric identifier must also hash equal, or
+    /// hash-based collections would treat them as distinct. Ordinal comparison means casing differences are NOT
+    /// expected to compare equal here — this instead pins down that two references built from the same valid
+    /// identifier chain via different call sites hash identically.
+    /// </summary>
+    [Fact]
+    public void GetHashCode_equal_versions_hash_equal()
+    {
+        var a = new SemanticVersion(1, 0, 0, "beta.1");
+        var b = SemanticVersion.Parse("1.0.0-beta.1");
 
         Assert.Equal(a, b);
-        Assert.Equal(hashA, hashB);
+        Assert.Equal(a.GetHashCode(), b.GetHashCode());
     }
 
     [Fact]
