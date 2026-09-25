@@ -8,8 +8,10 @@ namespace GitHubReleaseUpdater.Verification;
 public interface IChecksumProvider
 {
     /// <summary>
-    /// Returns the expected lowercase/uppercase hex SHA-256 for <paramref name="asset"/>,
-    /// or null when no checksum is available (verification is then skipped).
+    /// Returns the expected hex SHA-256 for <paramref name="asset"/> in any case, optionally prefixed with
+    /// <c>sha256:</c> (the form of <see cref="GitHubAsset.Digest"/>), or null when no checksum is available
+    /// (verification is then skipped). <see cref="ReleaseUpdater"/> rejects any other non-null value with
+    /// <see cref="Exceptions.UpdaterException"/> before downloading.
     /// </summary>
     Task<string?> GetExpectedSha256Async(GitHubRelease release, GitHubAsset asset, CancellationToken cancellationToken = default);
 }
