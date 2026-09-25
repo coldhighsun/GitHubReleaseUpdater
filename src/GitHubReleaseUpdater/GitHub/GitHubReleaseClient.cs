@@ -448,7 +448,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
             }
             catch (JsonException ex)
             {
-                throw new GitHubApiException($"Failed to parse GitHub API response from {url}.", ex);
+                throw new GitHubApiException($"Failed to parse GitHub API response from {url}.", response.StatusCode, ex);
             }
         }
         catch (OperationCanceledException) when (scope.IsTimeout)

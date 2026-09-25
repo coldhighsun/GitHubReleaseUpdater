@@ -56,6 +56,21 @@ public class GitHubReleaseClientTests
         Assert.IsType<System.Text.Json.JsonException>(ex.InnerException);
     }
 
+    /// <summary>
+    /// An unparseable body on a 200 must report the real status, not a default 500 that looks like a transient
+    /// server error.
+    /// </summary>
+    [Fact]
+    public async Task GetLatestReleaseAsync_MalformedJsonOnSuccess_ReportsActualStatusCode()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.OK, "{not json");
+        using var client = TestData.Client(handler);
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => client.GetLatestReleaseAsync("o", "r"));
+
+        Assert.Equal(HttpStatusCode.OK, ex.StatusCode);
+    }
+
     [Fact]
     public async Task OpenAssetStream_uses_api_url_with_octet_stream_accept()
     {

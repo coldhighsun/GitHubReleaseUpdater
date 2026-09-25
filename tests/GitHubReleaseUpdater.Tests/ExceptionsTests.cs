@@ -123,6 +123,20 @@ public class ExceptionsTests
     }
 
     [Fact]
+    public void GitHubApiException_StatusAndInnerConstructor_SetsStatusAndInner()
+    {
+        var inner = new InvalidOperationException("inner");
+
+        var ex = new GitHubApiException("custom", HttpStatusCode.OK, inner);
+
+        Assert.Equal("custom", ex.Message);
+        Assert.Equal(HttpStatusCode.OK, ex.StatusCode);
+        Assert.Same(inner, ex.InnerException);
+        Assert.False(ex.IsRateLimited);
+        Assert.Equal(string.Empty, ex.ResponseBody);
+    }
+
+    [Fact]
     public void GitHubApiException_full_constructor_sets_all_properties()
     {
         var reset = DateTimeOffset.UtcNow;
