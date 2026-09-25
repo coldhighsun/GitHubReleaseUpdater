@@ -548,6 +548,30 @@ public class GitHubReleaseClientTests
     }
 
     /// <summary>
+    /// A zero timeout would fail every request instantly and an out-of-range one would throw on every request, so
+    /// both are rejected when the client is created.
+    /// </summary>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-1_000L)]
+    [InlineData((long)uint.MaxValue)]
+    public void Constructor_InvalidTimeout_ThrowsArgumentOutOfRangeException(long milliseconds)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => TestData.Client(new DelayingHttpHandler(), timeout: TimeSpan.FromMilliseconds(milliseconds)));
+    }
+
+    [Fact]
+    public async Task GetLatestReleaseAsync_InfiniteTimeout_DoesNotTimeOut()
+    {
+        var handler = new StubHttpHandler().On("/releases/latest", HttpStatusCode.OK, TestData.Read("release-latest.json"));
+        using var client = TestData.Client(handler, timeout: Timeout.InfiniteTimeSpan);
+
+        var release = await client.GetLatestReleaseAsync("o", "r");
+
+        Assert.NotNull(release);
+    }
+
+    /// <summary>
     /// With the per-request timeout disabled, <see cref="HttpClient.Timeout"/> elapsing must surface as
     /// <see cref="TimeoutException"/> rather than a <see cref="TaskCanceledException"/> that looks like caller cancellation.
     /// </summary>

@@ -51,6 +51,18 @@ public class ReleaseUpdaterTests : IDisposable
         DownloadRetryDelay = downloadRetryDelay ?? TimeSpan.FromSeconds(1),
     };
 
+    /// <summary>
+    /// Builds minimal test <see cref="UpdaterOptions"/> with the given <see cref="UpdaterOptions.Timeout"/>, which may be null.
+    /// </summary>
+    private static UpdaterOptions TimeoutOptions(TimeSpan? timeout) => new()
+    {
+        Owner = "o",
+        Repo = "r",
+        CurrentVersion = "1.0.0",
+        AssetSelector = new RuntimeAssetSelector(Win64),
+        Timeout = timeout,
+    };
+
     [Fact]
     public async Task Reports_update_when_latest_is_newer()
     {
@@ -252,6 +264,39 @@ public class ReleaseUpdaterTests : IDisposable
         var options = Options("1.0.0", downloadRetryDelay: TimeSpan.FromSeconds(-1));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
+    }
+
+    /// <summary>
+    /// Validated even over a caller-supplied client, which never sees <see cref="UpdaterOptions.Timeout"/> itself.
+    /// </summary>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-5L)]
+    public void Constructor_InvalidTimeoutWithCustomClient_ThrowsArgumentOutOfRangeException(long milliseconds)
+    {
+        var client = new FakeReleaseClient();
+        var options = TimeoutOptions(TimeSpan.FromMilliseconds(milliseconds));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
+    }
+
+    [Fact]
+    public void Constructor_ZeroTimeoutWithOwnClient_ThrowsArgumentOutOfRangeException()
+    {
+        var options = TimeoutOptions(TimeSpan.Zero);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options));
+    }
+
+    [Fact]
+    public void Constructor_InfiniteTimeout_IsAccepted()
+    {
+        var client = new FakeReleaseClient();
+        var options = TimeoutOptions(Timeout.InfiniteTimeSpan);
+
+        using var updater = new ReleaseUpdater(options, client);
+
+        Assert.Equal(Timeout.InfiniteTimeSpan, updater.Options.Timeout);
     }
 
     [Fact]
@@ -517,4 +562,5 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.True(download.Verified);
         Assert.Equal("test", await File.ReadAllTextAsync(download.FilePath));
     }
+
 }
