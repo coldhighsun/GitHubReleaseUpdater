@@ -240,7 +240,14 @@ public sealed class ReleaseUpdater : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
 
         // Resolve the expected checksum first so a missing one (with RequireChecksum) fails before any bytes are transferred.
-        var expected = await _checksums.GetExpectedSha256Async(release, asset, cancellationToken).ConfigureAwait(false);
+        var reported = await _checksums.GetExpectedSha256Async(release, asset, cancellationToken).ConfigureAwait(false);
+        // Normalize so a custom provider may return any form ChecksumParser accepts (e.g. GitHub's "sha256:<hex>"
+        // digest) without every download being rejected as a mismatch; anything else is a provider bug, reported
+        // as such rather than as a corrupt download.
+        var expected = reported is null
+            ? null
+            : ChecksumParser.NormalizeDigest(reported)
+              ?? throw new UpdaterException($"The checksum provider returned '{reported}' for asset '{asset.Name}', which is not a SHA-256 hex digest.");
         if (expected is null && _options.RequireChecksum)
             throw new UpdaterException($"No checksum is available for asset '{asset.Name}' and RequireChecksum is enabled.");
 

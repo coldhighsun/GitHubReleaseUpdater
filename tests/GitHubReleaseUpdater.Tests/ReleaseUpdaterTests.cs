@@ -312,6 +312,42 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.Null(updater.Options.DownloadIdleTimeout);
     }
 
+    /// <summary>
+    /// A custom provider may return GitHub's own <c>sha256:</c>-prefixed digest form in any case; it must verify
+    /// instead of being reported as a mismatch.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_CustomProviderReturnsPrefixedUppercaseDigest_Verifies()
+    {
+        var payload = new byte[] { 1, 2, 3 };
+        var hash = Convert.ToHexStringLower(SHA256.HashData(payload));
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", payload.Length, "app-win-x64.zip") };
+        client.AssetBytes["app-win-x64.zip"] = payload;
+        var provider = new RawChecksumProvider($"sha256:{hash.ToUpperInvariant()}");
+        using var updater = new ReleaseUpdater(Options("1.0.0", checksums: provider), client);
+
+        var download = await updater.DownloadAsync(await updater.CheckForUpdateAsync(), _dir);
+
+        Assert.True(download.Verified);
+        Assert.Equal(hash, download.Sha256);
+        Assert.True(File.Exists(download.FilePath));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_CustomProviderReturnsInvalidDigest_ThrowsBeforeDownloading()
+    {
+        var client = new FakeReleaseClient { Latest = TestData.Release("v2.0.0", 3, "app-win-x64.zip") };
+        client.AssetBytes["app-win-x64.zip"] = [1, 2, 3];
+        using var updater = new ReleaseUpdater(Options("1.0.0", checksums: new RawChecksumProvider("not-a-digest")), client);
+
+        var check = await updater.CheckForUpdateAsync();
+        var ex = await Assert.ThrowsAsync<UpdaterException>(() => updater.DownloadAsync(check, _dir));
+
+        Assert.IsNotType<ChecksumMismatchException>(ex);
+        Assert.Contains("not-a-digest", ex.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(_dir) && Directory.EnumerateFileSystemEntries(_dir).Any());
+    }
+
     [Fact]
     public async Task Download_mismatch_deletes_file_and_throws()
     {
@@ -576,4 +612,16 @@ public class ReleaseUpdaterTests : IDisposable
         Assert.Equal("test", await File.ReadAllTextAsync(download.FilePath));
     }
 
+    /// <summary>
+    /// Custom <see cref="IChecksumProvider"/> returning a value verbatim, without the normalization
+    /// <see cref="StaticChecksumProvider"/> applies.
+    /// </summary>
+    private sealed class RawChecksumProvider(string value) : IChecksumProvider
+    {
+        /// <summary>
+        /// Returns the configured value for every asset.
+        /// </summary>
+        public Task<string?> GetExpectedSha256Async(GitHubReleaseUpdater.GitHub.Models.GitHubRelease release, GitHubReleaseUpdater.GitHub.Models.GitHubAsset asset, CancellationToken cancellationToken = default)
+            => Task.FromResult<string?>(value);
+    }
 }
