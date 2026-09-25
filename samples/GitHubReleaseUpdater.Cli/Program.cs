@@ -309,6 +309,15 @@ internal static class Cli
     }
 
     /// <summary>
+    /// Formats a remaining time as <c>mm:ss</c>, or <c>h:mm:ss</c> once it reaches an hour (a plain <c>mm:ss</c>
+    /// would silently drop the hours, showing 1h05m as 05:00).
+    /// </summary>
+    internal static string FormatEta(TimeSpan remaining)
+        => remaining.TotalHours >= 1
+            ? string.Create(CultureInfo.InvariantCulture, $"{(long)remaining.TotalHours}:{remaining:mm\\:ss}")
+            : remaining.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// Renders download progress as a single overwritten line on <paramref name="output"/>.
     /// </summary>
     private sealed class ConsoleProgress(TextWriter output) : IProgress<DownloadProgress>
@@ -320,7 +329,7 @@ internal static class Cli
         {
             var pct = p.Percentage is { } x ? string.Create(CultureInfo.InvariantCulture, $"{x,5:0.0}%") : "  ?  ";
             var speed = FormatBytes((long)p.BytesPerSecond) + "/s";
-            var eta = p.EstimatedRemaining is { } r ? $" ETA {r:mm\\:ss}" : string.Empty;
+            var eta = p.EstimatedRemaining is { } r ? $" ETA {FormatEta(r)}" : string.Empty;
             output.Write($"\r{pct}  {FormatBytes(p.BytesReceived)}/{(p.TotalBytes is { } t ? FormatBytes(t) : "?")}  {speed}{eta}   ");
         }
     }
