@@ -135,10 +135,34 @@ public class ReleaseUpdaterTests : IDisposable
     [Fact]
     public async Task Cancellation_still_throws_instead_of_being_captured()
     {
-        var client = new FakeReleaseClient { ThrowOnFetch = new OperationCanceledException() };
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var client = new FakeReleaseClient { ThrowOnFetch = new OperationCanceledException(cts.Token) };
         using var updater = new ReleaseUpdater(Options("1.0.0"), client);
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => updater.CheckForUpdateAsync());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => updater.CheckForUpdateAsync(cancellationToken: cts.Token));
+    }
+
+    /// <summary>
+    /// A cancellation the caller did not request (a handler-level timeout, <see cref="HttpClient.CancelPendingRequests"/>)
+    /// is just another failure, so it must be captured in the result rather than escape as if the caller cancelled.
+    /// </summary>
+    [Fact]
+    public async Task CheckForUpdateAsync_CancellationNotRequestedByCaller_IsCapturedAsError()
+    {
+        using var http = new HttpClient(new SelfCancellingHttpHandler());
+        using var updater = new ReleaseUpdater(new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            HttpClient = http,
+        });
+
+        var result = await updater.CheckForUpdateAsync();
+
+        Assert.False(result.Success);
+        Assert.IsAssignableFrom<OperationCanceledException>(result.Error);
     }
 
     [Fact]

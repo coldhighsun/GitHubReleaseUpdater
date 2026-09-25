@@ -194,7 +194,9 @@ public sealed class ReleaseUpdater : IDisposable
 
             return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Only the caller's own cancellation escapes; any other OperationCanceledException (a handler-level timeout,
+        // HttpClient.CancelPendingRequests) is an ordinary failure under the "never throws" contract.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             return UpdateCheckResult.Failed(_options.CurrentVersion, ex);
         }
