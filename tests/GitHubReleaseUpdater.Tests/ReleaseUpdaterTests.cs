@@ -52,15 +52,17 @@ public class ReleaseUpdaterTests : IDisposable
     };
 
     /// <summary>
-    /// Builds minimal test <see cref="UpdaterOptions"/> with the given <see cref="UpdaterOptions.Timeout"/>, which may be null.
+    /// Builds minimal test <see cref="UpdaterOptions"/> with the given <see cref="UpdaterOptions.Timeout"/> and
+    /// <see cref="UpdaterOptions.DownloadIdleTimeout"/>, either of which may be null.
     /// </summary>
-    private static UpdaterOptions TimeoutOptions(TimeSpan? timeout) => new()
+    private static UpdaterOptions TimeoutOptions(TimeSpan? timeout, TimeSpan? downloadIdleTimeout) => new()
     {
         Owner = "o",
         Repo = "r",
         CurrentVersion = "1.0.0",
         AssetSelector = new RuntimeAssetSelector(Win64),
         Timeout = timeout,
+        DownloadIdleTimeout = downloadIdleTimeout,
     };
 
     [Fact]
@@ -275,7 +277,7 @@ public class ReleaseUpdaterTests : IDisposable
     public void Constructor_InvalidTimeoutWithCustomClient_ThrowsArgumentOutOfRangeException(long milliseconds)
     {
         var client = new FakeReleaseClient();
-        var options = TimeoutOptions(TimeSpan.FromMilliseconds(milliseconds));
+        var options = TimeoutOptions(TimeSpan.FromMilliseconds(milliseconds), TimeSpan.FromSeconds(30));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
     }
@@ -283,20 +285,31 @@ public class ReleaseUpdaterTests : IDisposable
     [Fact]
     public void Constructor_ZeroTimeoutWithOwnClient_ThrowsArgumentOutOfRangeException()
     {
-        var options = TimeoutOptions(TimeSpan.Zero);
+        var options = TimeoutOptions(TimeSpan.Zero, TimeSpan.FromSeconds(30));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options));
     }
 
-    [Fact]
-    public void Constructor_InfiniteTimeout_IsAccepted()
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-5L)]
+    public void Constructor_InvalidDownloadIdleTimeout_ThrowsArgumentOutOfRangeException(long milliseconds)
     {
         var client = new FakeReleaseClient();
-        var options = TimeoutOptions(Timeout.InfiniteTimeSpan);
+        var options = TimeoutOptions(TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(milliseconds));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReleaseUpdater(options, client));
+    }
+
+    [Fact]
+    public void Constructor_NullAndInfiniteTimeouts_AreAccepted()
+    {
+        var client = new FakeReleaseClient();
+        var options = TimeoutOptions(Timeout.InfiniteTimeSpan, null);
 
         using var updater = new ReleaseUpdater(options, client);
 
-        Assert.Equal(Timeout.InfiniteTimeSpan, updater.Options.Timeout);
+        Assert.Null(updater.Options.DownloadIdleTimeout);
     }
 
     [Fact]

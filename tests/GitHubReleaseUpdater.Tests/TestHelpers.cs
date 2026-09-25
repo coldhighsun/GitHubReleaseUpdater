@@ -281,6 +281,12 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
     /// </summary>
     public Action? BeforeFailure { get; set; }
 
+    /// <summary>
+    /// When true, the failing attempt stalls (its read never completes until the read's token is cancelled) instead of
+    /// throwing, simulating a connection that stops delivering data without being closed.
+    /// </summary>
+    public bool StallInsteadOfFail { get; set; }
+
     /// <summary>Number of calls made to <see cref="OpenAssetStreamAsync(GitHubAsset, long, CancellationToken)"/> so far.</summary>
     public int Attempts { get; private set; }
 
@@ -296,7 +302,7 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
         RequestedRangeStarts.Add(rangeStart);
         var effectiveStart = HonorRange ? rangeStart : 0;
         var remaining = FullBytes[(int)effectiveStart..];
-        Stream stream = Attempts == FailAfterBytesOnAttempt ? new FailingAfterStream(remaining, FailAfterBytes, BeforeFailure) : new MemoryStream(remaining);
+        Stream stream = Attempts == FailAfterBytesOnAttempt ? new FailingAfterStream(remaining, FailAfterBytes, BeforeFailure, StallInsteadOfFail) : new MemoryStream(remaining);
         var isPartial = HonorRange && rangeStart > 0;
         return Task.FromResult(new AssetStream(stream, remaining.Length, new MemoryStream(), isPartial, rangeStart, FullBytes.Length));
     }
@@ -308,23 +314,28 @@ internal sealed class ResumableAssetClient : IGitHubReleaseClient
 
     /// <summary>
     /// Stream that yields <paramref name="data"/> up to <paramref name="failAfter"/> bytes, then throws
-    /// <see cref="HttpRequestException"/> as if the connection broke mid-transfer.
+    /// <see cref="HttpRequestException"/> as if the connection broke mid-transfer, or, when <paramref name="stall"/>
+    /// is true, blocks until the read's token is cancelled as if the connection went silent.
     /// </summary>
-    private sealed class FailingAfterStream(byte[] data, int failAfter, Action? beforeFailure) : Stream
+    private sealed class FailingAfterStream(byte[] data, int failAfter, Action? beforeFailure, bool stall) : Stream
     {
         private int _position;
 
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (_position >= failAfter || _position >= data.Length)
             {
                 beforeFailure?.Invoke();
+                if (stall)
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
                 throw new HttpRequestException("simulated connection reset mid-transfer");
             }
             var toCopy = Math.Min(buffer.Length, Math.Min(data.Length - _position, failAfter - _position));
             data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
             _position += toCopy;
-            return ValueTask.FromResult(toCopy);
+            return toCopy;
         }
 
         public override bool CanRead => true;

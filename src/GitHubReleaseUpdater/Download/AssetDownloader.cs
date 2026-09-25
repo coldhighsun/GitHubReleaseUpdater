@@ -76,7 +76,8 @@ public sealed class AssetDownloader
 
     /// <summary>
     /// Extra attempts made after a failed download before giving up, applied per <see cref="DownloadAsync"/> call.
-    /// A transient failure (network I/O error, request timeout, a truncated body or one whose size differs from the
+    /// A transient failure (network I/O error, request timeout, a body that stalls past <see cref="IdleTimeout"/>,
+    /// a truncated body or one whose size differs from the
     /// release's listed size, or a GitHub 5xx/429/408 response)
     /// is retried with exponential backoff starting at <see cref="RetryDelay"/> and doubling each attempt; a
     /// checksum mismatch, disk error, invalid argument, or caller cancellation is never retried. Default 2 (3
@@ -103,6 +104,30 @@ public sealed class AssetDownloader
     /// governs whether an already-completed file at the destination may be replaced.
     /// </summary>
     public bool AllowResume { get; init; } = true;
+
+    /// <summary>
+    /// Backing field of <see cref="IdleTimeout"/>.
+    /// </summary>
+    private readonly TimeSpan? _idleTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Longest a single read of the asset stream may wait for data before the transfer is treated as stalled and
+    /// fails with <see cref="TimeoutException"/>, which is retried (resuming from the last checkpoint when
+    /// <see cref="AllowResume"/> is true) like any other transient failure. The timer restarts on every chunk
+    /// received, so this bounds idle time, not total transfer time — without it a connection that stays open but
+    /// stops sending data would hang the download forever. Null (or <see cref="Timeout.InfiniteTimeSpan"/>)
+    /// disables it. Default 30 seconds.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is shorter than 1 millisecond or too large.</exception>
+    public TimeSpan? IdleTimeout
+    {
+        get => _idleTimeout;
+        init
+        {
+            TimeoutGuard.ThrowIfInvalid(value, nameof(IdleTimeout));
+            _idleTimeout = value;
+        }
+    }
 
     /// <summary>
     /// Creates a downloader.
@@ -582,7 +607,7 @@ public sealed class AssetDownloader
 
         progress?.Report(new DownloadProgress(received, total, TimeSpan.Zero) { ResumedBytes = initialReceived });
         int read;
-        while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+        while ((read = await ReadChunkAsync(source, buffer, cancellationToken).ConfigureAwait(false)) > 0)
         {
             await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             received += read;
@@ -607,6 +632,30 @@ public sealed class AssetDownloader
         }
 
         progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed) { ResumedBytes = initialReceived });
+    }
+
+    /// <summary>
+    /// Reads the next chunk of <paramref name="source"/>, failing with <see cref="TimeoutException"/> when no data
+    /// arrives within <see cref="IdleTimeout"/>. Each read gets its own timer, so time spent writing or
+    /// checkpointing between reads never counts towards it.
+    /// </summary>
+    private async ValueTask<int> ReadChunkAsync(Stream source, Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        if (_idleTimeout is not { } timeout || timeout == Timeout.InfiniteTimeSpan)
+        {
+            return await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+
+        using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        idleCts.CancelAfter(timeout);
+        try
+        {
+            return await source.ReadAsync(buffer, idleCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && idleCts.IsCancellationRequested)
+        {
+            throw new TimeoutException($"No data received from the asset stream for {timeout}.", ex);
+        }
     }
 
     /// <summary>
