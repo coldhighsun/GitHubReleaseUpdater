@@ -79,6 +79,7 @@ public sealed class ReleaseUpdater : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadRetryDelay.Ticks);
         // Also checked by GitHubReleaseClient, but validated here too so a caller-supplied client doesn't hide a bad value.
         TimeoutGuard.ThrowIfInvalid(options.Timeout, nameof(options.Timeout));
+        TimeoutGuard.ThrowIfInvalid(options.DownloadIdleTimeout, nameof(options.DownloadIdleTimeout));
 
         _options = options;
         _client = client;
@@ -90,6 +91,7 @@ public sealed class ReleaseUpdater : IDisposable
             MaxRetryAttempts = options.DownloadMaxRetryAttempts,
             RetryDelay = options.DownloadRetryDelay,
             AllowResume = options.DownloadAllowResume,
+            IdleTimeout = options.DownloadIdleTimeout,
         };
     }
 

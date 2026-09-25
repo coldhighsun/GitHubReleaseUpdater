@@ -528,6 +528,94 @@ public class AssetDownloaderTests : IDisposable
     }
 
     /// <summary>
+    /// A body that stops delivering data mid-transfer must time out and be resumed from the checkpoint rather than
+    /// hang the download forever.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_BodyStallsPastIdleTimeout_RetriesAndResumes()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 4, StallInsteadOfFail = true };
+        var asset = new GitHubAsset { Name = "a.bin", Size = full.Length };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero, IdleTimeout = TimeSpan.FromMilliseconds(100) };
+
+        var path = await downloader.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal([0, 4], client.RequestedRangeStarts);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_BodyStallsWithoutRetries_ThrowsTimeoutException()
+    {
+        var client = new ResumableAssetClient { FullBytes = [1, 2, 3, 4], FailAfterBytesOnAttempt = 1, FailAfterBytes = 2, StallInsteadOfFail = true };
+        var asset = new GitHubAsset { Name = "a.bin", Size = 4 };
+        var downloader = new AssetDownloader(client) { MaxRetryAttempts = 0, IdleTimeout = TimeSpan.FromMilliseconds(100) };
+
+        await Assert.ThrowsAsync<TimeoutException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.Equal(1, client.Attempts);
+    }
+
+    /// <summary>
+    /// A caller cancellation that lands while a read is stalled must surface as cancellation, not as an idle timeout.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_CallerCancelsDuringStall_ThrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource();
+        var client = new ResumableAssetClient
+        {
+            FullBytes = [1, 2, 3, 4],
+            FailAfterBytesOnAttempt = 1,
+            FailAfterBytes = 2,
+            StallInsteadOfFail = true,
+            BeforeFailure = () => cts.CancelAfter(TimeSpan.FromMilliseconds(50)),
+        };
+        var asset = new GitHubAsset { Name = "a.bin", Size = 4 };
+        var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero, IdleTimeout = TimeSpan.FromMinutes(1) };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloader.DownloadAsync(asset, _dir, cancellationToken: cts.Token));
+
+        Assert.Equal(1, client.Attempts);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_NullIdleTimeout_WaitsUntilCallerCancels()
+    {
+        var client = new BlockingClient();
+        var asset = new GitHubAsset { Name = "a.bin" };
+        using var cts = new CancellationTokenSource();
+        var downloader = new AssetDownloader(client) { IdleTimeout = null };
+        var task = downloader.DownloadAsync(asset, _dir, cancellationToken: cts.Token);
+        await client.Started.Task;
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-50_000L)]
+    [InlineData(5_000L)]
+    public void IdleTimeout_BelowOneMillisecond_ThrowsArgumentOutOfRangeException(long ticks)
+    {
+        var client = new FakeReleaseClient();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AssetDownloader(client) { IdleTimeout = TimeSpan.FromTicks(ticks) });
+    }
+
+    [Fact]
+    public void IdleTimeout_InfiniteTimeSpan_IsAccepted()
+    {
+        var client = new FakeReleaseClient();
+
+        var downloader = new AssetDownloader(client) { IdleTimeout = Timeout.InfiniteTimeSpan };
+
+        Assert.Equal(Timeout.InfiniteTimeSpan, downloader.IdleTimeout);
+    }
+
+    /// <summary>
     /// A caller cancellation that lands during the backoff between retries (rather than mid-transfer) must still
     /// remove the partial file left by the failed attempt, even though resume is enabled.
     /// </summary>

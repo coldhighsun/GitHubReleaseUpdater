@@ -61,7 +61,7 @@ if (check.IsUpdateAvailable)
 | Type | Purpose |
 |---|---|
 | `ReleaseUpdater` | Facade: `CheckForUpdateAsync()` and `DownloadAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume` are optional. |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout` are optional. |
 | `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
 | `SemanticVersion` | Minimal SemVer 2.0 implementation. Tolerates a `v` prefix, a missing patch (`1.2`) and a custom prefix (`TagPrefix`). |
@@ -124,13 +124,13 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 });
 ```
 
-On expiry the library throws `TimeoutException` (not `OperationCanceledException`), so it can be told apart from the caller cancelling `cancellationToken`. For asset downloads this only bounds the time to receive response headers, not the full transfer.
+On expiry the library throws `TimeoutException` (not `OperationCanceledException`), so it can be told apart from the caller cancelling `cancellationToken`. For asset downloads this only bounds the time to receive response headers, not the full transfer; a body that stalls mid-transfer is caught by `DownloadIdleTimeout` instead (see below).
 
 The value must be at least 1 millisecond and at most about 49.7 days, or `Timeout.InfiniteTimeSpan`; anything else (zero, negative, sub-millisecond, or longer) makes the `ReleaseUpdater` / `GitHubReleaseClient` constructor throw `ArgumentOutOfRangeException`.
 
 ### Download retries and resume
 
-`DownloadAsync()` retries a transient asset-download failure — a network I/O error, a request timeout, or a truncated body — with exponential backoff instead of failing on the first hiccup:
+`DownloadAsync()` retries a transient asset-download failure — a network I/O error, a request timeout, a truncated body, or a body that stalls — with exponential backoff instead of failing on the first hiccup:
 
 ```csharp
 using var updater = new ReleaseUpdater(new UpdaterOptions
@@ -140,8 +140,11 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
     CurrentVersion = "2.90.0",
     DownloadMaxRetryAttempts = 2,                     // default; 0 disables retrying
     DownloadRetryDelay = TimeSpan.FromSeconds(1),      // doubles each retry: 1s, 2s, …
+    DownloadIdleTimeout = TimeSpan.FromSeconds(30),    // default; null to wait indefinitely
 });
 ```
+
+`DownloadIdleTimeout` is the longest a download may go without receiving any data; the timer restarts on every chunk, so it bounds idle time, not total transfer time. A stall past it fails the attempt with `TimeoutException`, which is retried and resumed like any other transient failure.
 
 A checksum mismatch, a local disk error (full disk, locked file), an invalid argument, or the caller cancelling is never retried.
 
@@ -260,7 +263,7 @@ if (check.IsUpdateAvailable)
 | 类型 | 作用 |
 |---|---|
 | `ReleaseUpdater` | 门面。`CheckForUpdateAsync()` 与 `DownloadAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume` 可选。 |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout` 可选。 |
 | `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
 | `SemanticVersion` | 精简 SemVer 2.0 实现，容忍 `v` 前缀、`1.2` 缺省 patch、自定义前缀（`TagPrefix`）。 |
@@ -323,13 +326,13 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 });
 ```
 
-超时触发时抛出的是 `TimeoutException`（而非 `OperationCanceledException`），因此可以和调用方主动取消区分开。对于资产下载，它只限制"收到响应头"的时间，不限制整个传输过程。
+超时触发时抛出的是 `TimeoutException`（而非 `OperationCanceledException`），因此可以和调用方主动取消区分开。对于资产下载，它只限制"收到响应头"的时间，不限制整个传输过程；传输中途卡住的响应体由 `DownloadIdleTimeout` 负责（见下文）。
 
 取值必须在 1 毫秒到约 49.7 天之间，或为 `Timeout.InfiniteTimeSpan`；其他值（零、负数、不足 1 毫秒、或超过上限）会让 `ReleaseUpdater` / `GitHubReleaseClient` 的构造函数抛出 `ArgumentOutOfRangeException`。
 
 ### 下载重试与断点续传
 
-`DownloadAsync()` 遇到瞬时故障（网络 I/O 错误、请求超时、响应体被截断）时会按指数退避自动重试，而不是一次失败就直接抛出：
+`DownloadAsync()` 遇到瞬时故障（网络 I/O 错误、请求超时、响应体被截断、响应体卡住不动）时会按指数退避自动重试，而不是一次失败就直接抛出：
 
 ```csharp
 using var updater = new ReleaseUpdater(new UpdaterOptions
@@ -339,8 +342,11 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
     CurrentVersion = "2.90.0",
     DownloadMaxRetryAttempts = 2,                     // 默认值；设为 0 关闭重试
     DownloadRetryDelay = TimeSpan.FromSeconds(1),      // 每次重试翻倍：1s、2s……
+    DownloadIdleTimeout = TimeSpan.FromSeconds(30),    // 默认值；设为 null 则无限等待
 });
 ```
+
+`DownloadIdleTimeout` 是下载在收不到任何数据的情况下最多等待的时长；每收到一块数据计时就重新开始，所以它限制的是空闲时间，而不是总传输时间。超过该时长会让本次尝试以 `TimeoutException` 失败，并像其他瞬时故障一样重试和续传。
 
 校验和不匹配、本地磁盘错误（磁盘满、文件被占用）、参数错误、调用方主动取消——这几种情况都不会重试。
 
