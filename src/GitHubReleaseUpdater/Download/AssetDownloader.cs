@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
+using GitHubReleaseUpdater.Verification;
 
 namespace GitHubReleaseUpdater.Download;
 
@@ -134,6 +135,41 @@ public sealed class AssetDownloader
         IProgress<DownloadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        var (path, _) = await DownloadCoreAsync(asset, directory, fileName, overwrite, progress, computeSha256: false, expectedSha256: null, cancellationToken).ConfigureAwait(false);
+        return path;
+    }
+
+    /// <summary>
+    /// Like <see cref="DownloadAsync"/> (replacing any existing destination file), but hashes the completed
+    /// <c>.partial</c> before it is moved into place and returns that SHA-256 alongside the final path. When
+    /// <paramref name="expectedSha256"/> is supplied and does not match, the partial and its sidecar are deleted,
+    /// the destination is left untouched, and <see cref="ChecksumMismatchException"/> is thrown without retrying.
+    /// </summary>
+    internal async Task<(string Path, string Sha256)> DownloadVerifiedAsync(
+        GitHubAsset asset,
+        string directory,
+        string? expectedSha256,
+        IProgress<DownloadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var (path, sha256) = await DownloadCoreAsync(asset, directory, fileName: null, overwrite: true, progress, computeSha256: true, expectedSha256, cancellationToken).ConfigureAwait(false);
+        return (path, sha256!);
+    }
+
+    /// <summary>
+    /// Shared implementation of <see cref="DownloadAsync"/> and <see cref="DownloadVerifiedAsync"/>. The returned
+    /// hash is null unless <paramref name="computeSha256"/> is true.
+    /// </summary>
+    private async Task<(string Path, string? Sha256)> DownloadCoreAsync(
+        GitHubAsset asset,
+        string directory,
+        string? fileName,
+        bool overwrite,
+        IProgress<DownloadProgress>? progress,
+        bool computeSha256,
+        string? expectedSha256,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(asset);
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
 
@@ -208,6 +244,22 @@ public sealed class AssetDownloader
                         await target.FlushAsync(cancellationToken).ConfigureAwait(false);
                     }
 
+                    string? sha256 = null;
+                    if (computeSha256)
+                    {
+                        sha256 = await FileHasher.Sha256Async(partialPath, cancellationToken).ConfigureAwait(false);
+                        if (expectedSha256 is not null && !FileHasher.HashEquals(expectedSha256, sha256))
+                        {
+                            // Verify before the move so a bad download never replaces a good existing file. The
+                            // partial is complete but wrong, so resuming it could never help: discard it outright.
+                            TryDelete(partialPath);
+                            TryDelete(metaPath);
+                            // Report the (now deleted) partial, never finalPath: that may hold a good earlier download
+                            // a caller must not be led into deleting.
+                            throw new ChecksumMismatchException(partialPath, expectedSha256, sha256);
+                        }
+                    }
+
                     // Re-check (rather than trust the pre-lock check above) so a concurrent DownloadAsync call for
                     // the same destination — which only just released pathLock after completing — can't be
                     // silently clobbered by this call finishing second.
@@ -219,7 +271,7 @@ public sealed class AssetDownloader
                     // one in place.
                     File.Move(partialPath, finalPath, overwrite);
                     TryDelete(metaPath);
-                    return finalPath;
+                    return (finalPath, sha256);
                 }
                 // A range that's no longer valid for this asset (e.g. it was regenerated with a smaller size between
                 // attempts) can never succeed by resuming again, so the partial is discarded unconditionally — even

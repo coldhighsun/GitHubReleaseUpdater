@@ -210,7 +210,8 @@ public sealed class ReleaseUpdater : IDisposable
 
     /// <summary>
     /// Downloads the asset selected in <paramref name="check"/> into <paramref name="directory"/>, then verifies its SHA-256
-    /// when a checksum can be resolved. On mismatch the file is deleted and <see cref="ChecksumMismatchException"/> is thrown.
+    /// when a checksum can be resolved. Verification happens before the file is moved into place, so on mismatch any
+    /// existing file at the destination is left untouched, nothing is written, and <see cref="ChecksumMismatchException"/> is thrown.
     /// </summary>
     /// <exception cref="InvalidOperationException">No update is available in <paramref name="check"/>.</exception>
     /// <exception cref="AssetNotFoundException">No asset matched the selector.</exception>
@@ -239,38 +240,10 @@ public sealed class ReleaseUpdater : IDisposable
         if (expected is null && _options.RequireChecksum)
             throw new UpdaterException($"No checksum is available for asset '{asset.Name}' and RequireChecksum is enabled.");
 
-        var path = await _downloader.DownloadAsync(asset, directory, progress: progress, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        string actual;
-        try
-        {
-            actual = await FileHasher.Sha256Async(path, cancellationToken).ConfigureAwait(false);
-            if (expected is not null && !FileHasher.HashEquals(expected, actual))
-            {
-                // A failed delete must not hide the mismatch, which is the error the caller needs to see.
-                TryDelete(path);
-                throw new ChecksumMismatchException(path, expected, actual);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            TryDelete(path);
-            throw;
-        }
+        // The downloader verifies the bytes before moving them into place, so a mismatch never replaces an
+        // existing file at the destination.
+        var (path, actual) = await _downloader.DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
 
         return new DownloadResult(path, asset, actual, verified: expected is not null);
-    }
-
-    /// <summary>
-    /// Deletes a file if it exists, silently ignoring I/O and permission errors.
-    /// </summary>
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
     }
 }
