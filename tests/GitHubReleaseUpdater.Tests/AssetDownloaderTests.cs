@@ -249,6 +249,51 @@ public class AssetDownloaderTests : IDisposable
         Assert.Equal([2L], client.RequestedRangeStarts); // asked to resume at 2, but the server ignored it
     }
 
+    /// <summary>
+    /// A partial whose checkpoint already covers the whole asset (e.g. the final rename failed) must restart from 0
+    /// rather than request the unsatisfiable range <c>bytes={Size}-</c>, which a real server answers with 416.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_CheckpointCoversWholeAsset_RestartsFromZeroWithoutRangeRequest()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5 };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+        Directory.CreateDirectory(_dir);
+        await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), full);
+        var tailHash = Convert.ToHexStringLower(MD5.HashData(full));
+        await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{full.Length}:{tailHash}");
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full);
+        using var client = TestData.Client(handler);
+
+        var path = await new AssetDownloader(client) { MaxRetryAttempts = 0 }.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Null(handler.Requests.Single().Headers.Range);
+    }
+
+    /// <summary>
+    /// With an unknown asset size a complete partial can't be recognized up front, so its range request earns a
+    /// 416; that must still fall back to a full restart even when no retries are configured.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_CompletePartialOfUnknownSize_RestartsAfterRangeRejected()
+    {
+        var full = new byte[] { 1, 2, 3, 4, 5 };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = 0, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+        Directory.CreateDirectory(_dir);
+        await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), full);
+        var tailHash = Convert.ToHexStringLower(MD5.HashData(full));
+        await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{full.Length}:{tailHash}");
+        var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full);
+        using var client = TestData.Client(handler);
+
+        var path = await new AssetDownloader(client) { MaxRetryAttempts = 0, RetryDelay = TimeSpan.Zero }.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[1].Headers.Range);
+    }
+
     [Fact]
     public async Task Refuses_overwrite_when_disabled()
     {
