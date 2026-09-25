@@ -38,11 +38,24 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
     /// <summary>
     /// Creates a version from its components.
     /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="prerelease"/> or <paramref name="buildMetadata"/> is non-empty but is not a valid
+    /// SemVer dot-separated identifier chain (e.g. contains an empty segment, an invalid character, or —
+    /// for <paramref name="prerelease"/> only — a numeric segment with a leading zero).
+    /// </exception>
     public SemanticVersion(int major, int minor, int patch, string? prerelease = null, string? buildMetadata = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(major);
         ArgumentOutOfRangeException.ThrowIfNegative(minor);
         ArgumentOutOfRangeException.ThrowIfNegative(patch);
+        if (!string.IsNullOrEmpty(prerelease) && !IsValidIdentifierChain(prerelease, allowLeadingZeros: false))
+        {
+            throw new ArgumentException($"'{prerelease}' is not a valid semantic version prerelease identifier chain.", nameof(prerelease));
+        }
+        if (!string.IsNullOrEmpty(buildMetadata) && !IsValidIdentifierChain(buildMetadata, allowLeadingZeros: true))
+        {
+            throw new ArgumentException($"'{buildMetadata}' is not a valid semantic version build metadata identifier chain.", nameof(buildMetadata));
+        }
         Major = major;
         Minor = minor;
         Patch = patch;
