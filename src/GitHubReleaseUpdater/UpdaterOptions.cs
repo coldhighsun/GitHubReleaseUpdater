@@ -97,7 +97,10 @@ public sealed class UpdaterOptions
     /// rely solely on the underlying <see cref="HttpClient"/>'s own timeout (100 seconds by default) instead.
     /// On expiry a <see cref="TimeoutException"/> is thrown rather than an <see cref="OperationCanceledException"/>
     /// tied to the caller's cancellation token, so it is distinguishable from caller-requested cancellation. For
-    /// asset downloads this only bounds the time to receive response headers, not the full transfer.
+    /// asset downloads this only bounds the time to receive response headers, not the full transfer. Must be at
+    /// least 1 millisecond (or
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>); <see cref="ReleaseUpdater"/> throws
+    /// <see cref="ArgumentOutOfRangeException"/> otherwise.
     /// </summary>
     public TimeSpan? Timeout { get; init; } = TimeSpan.FromSeconds(10);
 

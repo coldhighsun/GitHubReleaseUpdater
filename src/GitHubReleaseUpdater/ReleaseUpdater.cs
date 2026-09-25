@@ -77,6 +77,8 @@ public sealed class ReleaseUpdater : IDisposable
         ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReleaseScanCount, 100);
         ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadMaxRetryAttempts);
         ArgumentOutOfRangeException.ThrowIfNegative(options.DownloadRetryDelay.Ticks);
+        // Also checked by GitHubReleaseClient, but validated here too so a caller-supplied client doesn't hide a bad value.
+        TimeoutGuard.ThrowIfInvalid(options.Timeout, nameof(options.Timeout));
 
         _options = options;
         _client = client;

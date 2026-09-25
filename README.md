@@ -126,6 +126,8 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 
 On expiry the library throws `TimeoutException` (not `OperationCanceledException`), so it can be told apart from the caller cancelling `cancellationToken`. For asset downloads this only bounds the time to receive response headers, not the full transfer.
 
+The value must be at least 1 millisecond and at most about 49.7 days, or `Timeout.InfiniteTimeSpan`; anything else (zero, negative, sub-millisecond, or longer) makes the `ReleaseUpdater` / `GitHubReleaseClient` constructor throw `ArgumentOutOfRangeException`.
+
 ### Download retries and resume
 
 `DownloadAsync()` retries a transient asset-download failure — a network I/O error, a request timeout, or a truncated body — with exponential backoff instead of failing on the first hiccup:
@@ -322,6 +324,8 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 ```
 
 超时触发时抛出的是 `TimeoutException`（而非 `OperationCanceledException`），因此可以和调用方主动取消区分开。对于资产下载，它只限制"收到响应头"的时间，不限制整个传输过程。
+
+取值必须在 1 毫秒到约 49.7 天之间，或为 `Timeout.InfiniteTimeSpan`；其他值（零、负数、不足 1 毫秒、或超过上限）会让 `ReleaseUpdater` / `GitHubReleaseClient` 的构造函数抛出 `ArgumentOutOfRangeException`。
 
 ### 下载重试与断点续传
 

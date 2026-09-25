@@ -110,10 +110,13 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     /// <param name="timeout">
     /// Per-request timeout, or <see langword="null"/> to disable it and rely solely on <paramref name="httpClient"/>'s
     /// own timeout. On expiry a <see cref="TimeoutException"/> is thrown instead of an
-    /// <see cref="OperationCanceledException"/> tied to the caller's cancellation token.
+    /// <see cref="OperationCanceledException"/> tied to the caller's cancellation token. Must be at least 1 millisecond
+    /// (or <see cref="Timeout.InfiniteTimeSpan"/>).
     /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is shorter than 1 millisecond or too large.</exception>
     public GitHubReleaseClient(Uri? baseUrl, string? token, string? userAgent, HttpClient? httpClient, TimeSpan? timeout)
     {
+        TimeoutGuard.ThrowIfInvalid(timeout, nameof(timeout));
         _baseUrl = NormalizeBaseUrl(baseUrl ?? DefaultBaseUrl);
         _token = string.IsNullOrWhiteSpace(token) ? null : token.Trim();
         _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "GitHubReleaseUpdater" : userAgent;
