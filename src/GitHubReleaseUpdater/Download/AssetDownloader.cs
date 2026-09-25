@@ -223,6 +223,9 @@ public sealed class AssetDownloader
             await pathLock.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             lockAcquired = true;
 
+            // Whether the one extra restart a rejected range earns past MaxRetryAttempts has been spent, so a partial
+            // that can't be deleted (and so keeps sending the same doomed Range request) can't loop forever.
+            var rangeRestartUsed = false;
             for (var attempt = 0; ; attempt++)
             {
                 // Whether this attempt sent a Range header, so a 416 for it can always fall back to a full restart.
@@ -302,15 +305,19 @@ public sealed class AssetDownloader
                 // attempts) can never succeed by resuming again, so the partial is discarded unconditionally — even
                 // when AllowResume is true — so this and any later call restarts from 0 instead of failing forever.
                 // A rejected range (e.g. a complete partial of an asset whose size is unknown, so PartialMatchesAsset
-                // couldn't tell it was complete) always earns that one restart even past MaxRetryAttempts; the
-                // restart sends no Range header, so this can't loop.
+                // couldn't tell it was complete) earns one restart even past MaxRetryAttempts; the restart normally
+                // sends no Range header, and rangeRestartUsed stops it looping when the partial couldn't be deleted.
                 catch (GitHubApiException ex) when (ex.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
                 {
                     TryDelete(partialPath);
                     TryDelete(metaPath);
-                    if (attempt >= MaxRetryAttempts && !requestedRange)
+                    if (attempt >= MaxRetryAttempts)
                     {
-                        throw;
+                        if (!requestedRange || rangeRestartUsed)
+                        {
+                            throw;
+                        }
+                        rangeRestartUsed = true;
                     }
                     await DelayBeforeRetryAsync(attempt, partialPath, metaPath, cancellationToken).ConfigureAwait(false);
                 }
