@@ -266,6 +266,26 @@ public sealed class ReleaseUpdater : IDisposable
     }
 
     /// <summary>
+    /// Lists the downloadable assets of the release found by <paramref name="check"/>, each with the platform
+    /// detected from its file name, so a caller can let the user pick a download for any platform. Download the
+    /// chosen one with <see cref="DownloadAsync(GitHubRelease, GitHubAsset, string, IProgress{DownloadProgress}?, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="check">Result of <see cref="CheckForUpdateAsync"/>; its latest release is listed even when it is not an update.</param>
+    /// <param name="includeMetadata">When true, checksum/signature/SBOM sidecar files are listed too (flagged by <see cref="DescribedAsset.IsMetadata"/>).</param>
+    /// <returns>The assets in release order, or an empty list when the check found no release.</returns>
+    public IReadOnlyList<DescribedAsset> ListAssets(UpdateCheckResult check, bool includeMetadata = false)
+    {
+        ArgumentNullException.ThrowIfNull(check);
+        if (check.Release is not { } release)
+        {
+            return [];
+        }
+
+        var described = AssetPlatformDetector.Describe(release);
+        return includeMetadata ? described : described.Where(a => !a.IsMetadata).ToArray();
+    }
+
+    /// <summary>
     /// Starts the installer downloaded as <paramref name="download"/> and returns without waiting for it to finish.
     /// Immediately before starting it, the file on disk is hashed again and compared with the hash recorded when it
     /// was downloaded, so a file swapped or modified after verification (it usually sits in a user-writable folder

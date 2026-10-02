@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using GitHubReleaseUpdater.GitHub.Models;
 
 namespace GitHubReleaseUpdater.Assets;
@@ -8,7 +7,7 @@ namespace GitHubReleaseUpdater.Assets;
 /// tolerating common naming conventions such as <c>app-win-x64.zip</c>, <c>app_linux_amd64.tar.gz</c>, <c>app-darwin-arm64.dmg</c>.
 /// Checksum/signature files are never selected.
 /// </summary>
-public sealed partial class RuntimeAssetSelector : IAssetSelector
+public sealed class RuntimeAssetSelector : IAssetSelector
 {
     /// <summary>
     /// Target OS/architecture to match asset names against.
@@ -73,7 +72,7 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
     /// </summary>
     private int Score(string name, string[] osTokens, string[] archTokens)
     {
-        var tokens = TokenizeName(name);
+        var tokens = AssetPlatformDetector.TokenizeName(name);
         var osHit = tokens.Any(t => osTokens.Contains(t, StringComparer.OrdinalIgnoreCase));
         var archHit = tokens.Any(t => archTokens.Contains(t, StringComparer.OrdinalIgnoreCase));
 
@@ -106,20 +105,6 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
         // Windows heuristics: prefer installers/archives over bare exe when nothing else distinguishes them.
         if (_runtime.Os.Equals("win", StringComparison.OrdinalIgnoreCase) && (lower.EndsWith(".msi", StringComparison.Ordinal) || lower.EndsWith(".zip", StringComparison.Ordinal))) score += 1;
         return score;
-    }
-
-    /// <summary>
-    /// Lowercases and splits a file name into tokens, normalizing common compound OS/arch aliases first.
-    /// </summary>
-    private static string[] TokenizeName(string name)
-    {
-        // Collapse compound aliases that contain separators so they survive tokenization.
-        var normalized = name.ToLowerInvariant()
-            .Replace("x86_64", "x64", StringComparison.Ordinal)
-            .Replace("x86-64", "x64", StringComparison.Ordinal)
-            .Replace("64-bit", "64bit", StringComparison.Ordinal)
-            .Replace("32-bit", "32bit", StringComparison.Ordinal);
-        return TokenSplit().Split(normalized).Where(t => t.Length > 0).ToArray();
     }
 
     /// <summary>
@@ -159,10 +144,4 @@ public sealed partial class RuntimeAssetSelector : IAssetSelector
             || lower.EndsWith("sha512sums.txt", StringComparison.Ordinal)
             || lower.EndsWith("sha512sums", StringComparison.Ordinal);
     }
-
-    /// <summary>
-    /// Regex that splits a file name into tokens on separator characters.
-    /// </summary>
-    [GeneratedRegex(@"[-_.\s()\[\]]+")]
-    private static partial Regex TokenSplit();
 }
