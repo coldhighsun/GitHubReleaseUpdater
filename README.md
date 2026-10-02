@@ -60,7 +60,7 @@ if (check.IsUpdateAvailable)
 
 | Type | Purpose |
 |---|---|
-| `ReleaseUpdater` | Facade: `CheckForUpdateAsync()`, `DownloadAsync()`, `LaunchInstallerAsync()` and `DownloadAndLaunchInstallerAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
+| `ReleaseUpdater` | Facade: `CheckForUpdateAsync()`, `ListAssets()`, `DownloadAsync()`, `LaunchInstallerAsync()` and `DownloadAndLaunchInstallerAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
 | `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout`, `InstallerLauncher` are optional. |
 | `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
@@ -156,6 +156,25 @@ When a download is interrupted — whether it's about to be retried, or the proc
 - Throws `UpdaterException` if the server reported a Content-Length that does not match the bytes received.
 - When an expected hash can be resolved the file is verified before it is moved into place; on mismatch the download is discarded (any existing file at the destination is left untouched) and `ChecksumMismatchException` is thrown, its `FilePath` naming the discarded `.partial`. When no hash is available `DownloadResult.Verified` is `false` (set `RequireChecksum = true` to fail instead — it fails before any bytes are transferred).
 - Private repository assets are downloaded via the API endpoint with `Accept: application/octet-stream`; just supply a token.
+
+### Letting the user pick a platform
+
+`RuntimeAssetSelector` picks the asset for the *current* machine. To offer every platform instead, list the release's assets with the platform detected from each file name and let the user choose:
+
+```csharp
+var check = await updater.CheckForUpdateAsync();
+foreach (var a in updater.ListAssets(check))            // checksum/signature files are left out by default
+{
+    Console.WriteLine($"{a.Asset.Name,-40} os={a.Platform.Os ?? "?"} arch={a.Platform.Arch ?? "?"} {(a.MatchesCurrent ? "<- this machine" : "")}");
+}
+
+var chosen = updater.ListAssets(check).First(a => a.Platform is { Os: "linux", Arch: "arm64" });
+await updater.DownloadAsync(check.Release!, chosen.Asset, downloadDir);
+```
+
+- `AssetPlatformDetector.Detect(name)` returns an `AssetPlatform` (`Os`, `Arch`, `Rid`) using the same aliases as the selector (`windows`, `darwin`, `amd64`, `aarch64`, …). A part the file name does not mention is `null`; a name with neither (e.g. `app-setup.exe`) has `IsUnknown == true` and is never guessed.
+- `DescribedAsset` also carries `IsMetadata` and `MatchesCurrent` (false for unknown-platform and metadata files). `AssetPlatformDetector.Describe(release, runtime)` does the same for any `RuntimeInfo`.
+- To auto-pick for a specific platform rather than list, use `new RuntimeAssetSelector(new RuntimeInfo("linux", "arm64"))`.
 
 ### Launching the installer
 
@@ -288,7 +307,7 @@ if (check.IsUpdateAvailable)
 
 | 类型 | 作用 |
 |---|---|
-| `ReleaseUpdater` | 门面。`CheckForUpdateAsync()`、`DownloadAsync()`、`LaunchInstallerAsync()` 与 `DownloadAndLaunchInstallerAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
+| `ReleaseUpdater` | 门面。`CheckForUpdateAsync()`、`ListAssets()`、`DownloadAsync()`、`LaunchInstallerAsync()` 与 `DownloadAndLaunchInstallerAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
 | `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout`、`InstallerLauncher` 可选。 |
 | `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
@@ -384,6 +403,25 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 - 服务器报告了 Content-Length 但字节数不符时抛 `UpdaterException`。
 - 能解析到期望哈希时进行校验，校验在文件移动到目标位置之前进行，不匹配则丢弃本次下载（目标位置已有的文件保持不变）并抛 `ChecksumMismatchException`，其 `FilePath` 为被丢弃的 `.partial` 路径；无法解析到哈希时 `DownloadResult.Verified = false`（设置 `RequireChecksum = true` 可改为直接失败，且在传输前就会失败）。
 - 私有仓库资产通过 API 端点 + `Accept: application/octet-stream` 下载，只要提供 Token 即可。
+
+### 让用户选择平台
+
+`RuntimeAssetSelector` 只会为*当前机器*挑选资产。如果想列出所有平台让用户自己选，可以列出 Release 的资产及从文件名识别出的平台：
+
+```csharp
+var check = await updater.CheckForUpdateAsync();
+foreach (var a in updater.ListAssets(check))            // 默认不含校验和/签名文件
+{
+    Console.WriteLine($"{a.Asset.Name,-40} os={a.Platform.Os ?? "?"} arch={a.Platform.Arch ?? "?"} {(a.MatchesCurrent ? "<- 当前机器" : "")}");
+}
+
+var chosen = updater.ListAssets(check).First(a => a.Platform is { Os: "linux", Arch: "arm64" });
+await updater.DownloadAsync(check.Release!, chosen.Asset, downloadDir);
+```
+
+- `AssetPlatformDetector.Detect(name)` 返回 `AssetPlatform`（`Os`、`Arch`、`Rid`），使用与选择器相同的别名（`windows`、`darwin`、`amd64`、`aarch64`…）。文件名没提到的部分为 `null`；两者都没有的（如 `app-setup.exe`）`IsUnknown == true`，不会被猜测归类。
+- `DescribedAsset` 还带有 `IsMetadata` 与 `MatchesCurrent`（未知平台和元数据文件为 false）。`AssetPlatformDetector.Describe(release, runtime)` 可针对任意 `RuntimeInfo`。
+- 若只想为指定平台自动挑选而非列出，可用 `new RuntimeAssetSelector(new RuntimeInfo("linux", "arm64"))`。
 
 ### 运行安装程序
 
