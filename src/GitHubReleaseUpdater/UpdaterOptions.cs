@@ -1,4 +1,5 @@
 using GitHubReleaseUpdater.Assets;
+using GitHubReleaseUpdater.Installation;
 using GitHubReleaseUpdater.LastCheck;
 using GitHubReleaseUpdater.Verification;
 using GitHubReleaseUpdater.Versioning;
@@ -40,6 +41,12 @@ public sealed class UpdaterOptions
     /// When true, pre-releases are considered as update candidates.
     /// </summary>
     public bool IncludePrerelease { get; init; }
+
+    /// <summary>
+    /// Starts the installer for <see cref="ReleaseUpdater.LaunchInstallerAsync"/> and
+    /// <see cref="ReleaseUpdater.DownloadAndLaunchInstallerAsync"/>. Defaults to <see cref="ProcessInstallerLauncher"/>.
+    /// </summary>
+    public IInstallerLauncher? InstallerLauncher { get; init; }
 
     /// <summary>
     /// Optional store letting <see cref="ReleaseUpdater.CheckForUpdateAsync"/> throttle checks to

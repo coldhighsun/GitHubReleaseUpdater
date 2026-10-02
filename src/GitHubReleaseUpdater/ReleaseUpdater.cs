@@ -3,6 +3,7 @@ using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
+using GitHubReleaseUpdater.Installation;
 using GitHubReleaseUpdater.Verification;
 using GitHubReleaseUpdater.Versioning;
 
@@ -34,6 +35,11 @@ public sealed class ReleaseUpdater : IDisposable
     /// Streams asset bytes to disk with progress reporting.
     /// </summary>
     private readonly AssetDownloader _downloader;
+
+    /// <summary>
+    /// Starts downloaded installers.
+    /// </summary>
+    private readonly IInstallerLauncher _installerLauncher;
 
     /// <summary>
     /// The options this updater was created with.
@@ -86,6 +92,7 @@ public sealed class ReleaseUpdater : IDisposable
         _ownsClient = ownsClient;
         _selector = options.AssetSelector ?? new RuntimeAssetSelector();
         _checksums = options.ChecksumProvider ?? new ReleaseChecksumProvider(client);
+        _installerLauncher = options.InstallerLauncher ?? new ProcessInstallerLauncher();
         _downloader = new AssetDownloader(client)
         {
             MaxRetryAttempts = options.DownloadMaxRetryAttempts,
@@ -256,5 +263,63 @@ public sealed class ReleaseUpdater : IDisposable
         var (path, actual) = await _downloader.DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
 
         return new DownloadResult(path, asset, actual, verified: expected is not null);
+    }
+
+    /// <summary>
+    /// Starts the installer downloaded as <paramref name="download"/> and returns without waiting for it to finish.
+    /// Immediately before starting it, the file on disk is hashed again and compared with the hash recorded when it
+    /// was downloaded, so a file swapped or modified after verification (it usually sits in a user-writable folder
+    /// and is often started elevated) is never run.
+    /// </summary>
+    /// <param name="download">Result of <see cref="DownloadAsync(UpdateCheckResult, string, IProgress{DownloadProgress}?, CancellationToken)"/>.</param>
+    /// <param name="options">Arguments and policy for the launch; null starts the installer with no arguments.</param>
+    /// <param name="cancellationToken">Cancels the re-hash; the installer is not started once cancelled.</param>
+    /// <exception cref="UpdaterException"><see cref="InstallerLaunchOptions.RequireVerified"/> is set and the download was not verified.</exception>
+    /// <exception cref="ChecksumMismatchException">The file no longer has the hash it had when it was downloaded.</exception>
+    /// <exception cref="InstallerLaunchException">The installer could not be read or started (including a declined UAC prompt).</exception>
+    public async Task<InstallerLaunchResult> LaunchInstallerAsync(DownloadResult download, InstallerLaunchOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(download);
+        options ??= new InstallerLaunchOptions();
+
+        if (options.RequireVerified && !download.Verified)
+        {
+            throw new UpdaterException($"The download of '{download.Asset.Name}' was not checksum-verified and RequireVerified is enabled, so the installer was not started.");
+        }
+
+        string actual;
+        try
+        {
+            actual = await FileHasher.Sha256Async(download.FilePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InstallerLaunchException($"The installer '{download.FilePath}' could not be read before starting it: {ex.Message}", download.FilePath, isUserCancelled: false, ex);
+        }
+
+        if (!FileHasher.HashEquals(download.Sha256, actual))
+        {
+            throw new ChecksumMismatchException(download.FilePath, download.Sha256, actual);
+        }
+
+        return _installerLauncher.Launch(download.FilePath, options);
+    }
+
+    /// <summary>
+    /// Downloads and verifies the asset selected in <paramref name="check"/>, then starts it as an installer. The
+    /// installer is only started after the download has completed (and verified, when a checksum is available).
+    /// </summary>
+    /// <param name="check">Result of <see cref="CheckForUpdateAsync"/> with an update available and an asset selected.</param>
+    /// <param name="directory">Directory the installer is downloaded into.</param>
+    /// <param name="options">Arguments and policy for the launch; null starts the installer with no arguments.</param>
+    /// <param name="progress">Receives download progress.</param>
+    /// <param name="cancellationToken">Cancels the download; the installer is never started once cancelled.</param>
+    /// <exception cref="InvalidOperationException">No update is available in <paramref name="check"/>.</exception>
+    /// <exception cref="AssetNotFoundException">No asset matched the selector.</exception>
+    /// <exception cref="InstallerLaunchException">The installer could not be started (including a declined UAC prompt).</exception>
+    public async Task<InstallerLaunchResult> DownloadAndLaunchInstallerAsync(UpdateCheckResult check, string directory, InstallerLaunchOptions? options = null, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        var download = await DownloadAsync(check, directory, progress, cancellationToken).ConfigureAwait(false);
+        return await LaunchInstallerAsync(download, options, cancellationToken).ConfigureAwait(false);
     }
 }
