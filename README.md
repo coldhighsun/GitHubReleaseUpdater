@@ -16,9 +16,9 @@
 
 ## English
 
-A dependency-free .NET 10 library that turns GitHub Releases into an update source for your application: **check for a newer version → pick an asset → download with progress → verify SHA‑256**.
+A dependency-free .NET 10 library that turns GitHub Releases into an update source for your application: **check for a newer version → pick an asset → download with progress → verify SHA‑256 → (optionally) launch the installer**.
 
-Works with github.com and GitHub Enterprise Server, anonymously or with a token (private repositories / higher rate limits). It deliberately does **not** extract, replace files or restart the app — that part is up to the caller.
+Works with github.com and GitHub Enterprise Server, anonymously or with a token (private repositories / higher rate limits). It deliberately does **not** extract archives, replace files or restart the app — that part is up to the caller (or the installer you launch).
 
 ### Quick start
 
@@ -60,8 +60,8 @@ if (check.IsUpdateAvailable)
 
 | Type | Purpose |
 |---|---|
-| `ReleaseUpdater` | Facade: `CheckForUpdateAsync()` and `DownloadAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout` are optional. |
+| `ReleaseUpdater` | Facade: `CheckForUpdateAsync()`, `DownloadAsync()`, `LaunchInstallerAsync()` and `DownloadAndLaunchInstallerAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout`, `InstallerLauncher` are optional. |
 | `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
 | `SemanticVersion` | Minimal SemVer 2.0 implementation. Tolerates a `v` prefix, a missing patch (`1.2`) and a custom prefix (`TagPrefix`). |
@@ -157,6 +157,30 @@ When a download is interrupted — whether it's about to be retried, or the proc
 - When an expected hash can be resolved the file is verified before it is moved into place; on mismatch the download is discarded (any existing file at the destination is left untouched) and `ChecksumMismatchException` is thrown, its `FilePath` naming the discarded `.partial`. When no hash is available `DownloadResult.Verified` is `false` (set `RequireChecksum = true` to fail instead — it fails before any bytes are transferred).
 - Private repository assets are downloaded via the API endpoint with `Accept: application/octet-stream`; just supply a token.
 
+### Launching the installer
+
+When the release asset is an installer (an `.exe`/`.msi`), the library can start it after the download has been verified. It starts the installer through the OS shell (so an installer that requires elevation shows the normal UAC prompt) and returns immediately without waiting — the installer is expected to close and restart your app itself.
+
+```csharp
+using GitHubReleaseUpdater.Installation;
+
+var check = await updater.CheckForUpdateAsync();
+if (check.IsUpdateAvailable)
+{
+    // One step: download + verify + start.
+    await updater.DownloadAndLaunchInstallerAsync(check, downloadDir, InstallerLaunchOptions.InnoSetupSilent, progress);
+
+    // Or two steps, to run your own checks between downloading and starting:
+    var file = await updater.DownloadAsync(check, downloadDir, progress);
+    await updater.LaunchInstallerAsync(file, new InstallerLaunchOptions { Arguments = "/S", RequireVerified = true });
+}
+```
+
+- `InstallerLaunchOptions`: `Arguments`, `WorkingDirectory` (defaults to the installer's directory) and `RequireVerified` (refuse to start an installer whose checksum could not be verified). `InnoSetupSilent` (`/SILENT /SP- /NORESTART`) and `InnoSetupVerySilent` are ready-made presets.
+- The installer is never started when the download fails, is cancelled or fails verification. Right before starting it the file is hashed again and compared with the hash recorded at download time, so a file swapped or modified afterwards (installers usually sit in a user-writable folder and often run elevated) is never run; `ChecksumMismatchException` is thrown instead.
+- `InstallerLaunchException` (derived from `UpdaterException`) carries `FilePath` and `IsUserCancelled` — true when the user declined the UAC prompt, so callers can treat that differently from a genuine failure.
+- Supply `UpdaterOptions.InstallerLauncher` (an `IInstallerLauncher`) to customize or stub out how the installer is started.
+
 ### Exceptions
 
 All derive from `UpdaterException`:
@@ -164,6 +188,7 @@ All derive from `UpdaterException`:
 - `GitHubApiException` — carries `StatusCode`, `IsRateLimited`, `RateLimitResetAt`.
 - `AssetNotFoundException` — carries `AvailableAssets`.
 - `ChecksumMismatchException` — carries `Expected` / `Actual`.
+- `InstallerLaunchException` — carries `FilePath` / `IsUserCancelled`.
 
 `CheckForUpdateAsync()` never throws any of these (or any other exception) — it catches everything encountered while checking (API failures, a throwing `ILastCheckStore`, etc.) and reports it via `UpdateCheckResult.Success`/`Error` instead, so callers don't need a try/catch around it. A caller-requested cancellation still throws `OperationCanceledException` as usual. `DownloadAsync()` keeps the original throwing contract above.
 
@@ -205,6 +230,7 @@ src/GitHubReleaseUpdater/      library (NuGet package)
   Download/                    downloader and progress
   Verification/                checksum handling
   LastCheck/                   ILastCheckStore and InMemoryLastCheckStore
+  Installation/                installer launching
   Exceptions/                  exception types
 samples/GitHubReleaseUpdater.Cli/   sample command-line tool
 tests/GitHubReleaseUpdater.Tests/   xUnit tests
@@ -218,9 +244,9 @@ MIT
 
 ## 中文
 
-一个零依赖的 .NET 10 类库，用于把 GitHub Releases 作为应用的更新源：**检查新版本 → 选择资产 → 带进度下载 → SHA‑256 校验**。
+一个零依赖的 .NET 10 类库，用于把 GitHub Releases 作为应用的更新源：**检查新版本 → 选择资产 → 带进度下载 → SHA‑256 校验 →（可选）运行安装程序**。
 
-支持 github.com 与 GitHub Enterprise Server，支持匿名与 Token 访问（私有仓库 / 更高限流额度）。不负责解压、替换文件与重启，这些由调用方决定。
+支持 github.com 与 GitHub Enterprise Server，支持匿名与 Token 访问（私有仓库 / 更高限流额度）。不负责解压、替换文件与重启，这些由调用方（或被启动的安装程序）决定。
 
 ### 快速开始
 
@@ -262,8 +288,8 @@ if (check.IsUpdateAvailable)
 
 | 类型 | 作用 |
 |---|---|
-| `ReleaseUpdater` | 门面。`CheckForUpdateAsync()` 与 `DownloadAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout` 可选。 |
+| `ReleaseUpdater` | 门面。`CheckForUpdateAsync()`、`DownloadAsync()`、`LaunchInstallerAsync()` 与 `DownloadAndLaunchInstallerAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout`、`InstallerLauncher` 可选。 |
 | `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
 | `SemanticVersion` | 精简 SemVer 2.0 实现，容忍 `v` 前缀、`1.2` 缺省 patch、自定义前缀（`TagPrefix`）。 |
@@ -359,6 +385,30 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 - 能解析到期望哈希时进行校验，校验在文件移动到目标位置之前进行，不匹配则丢弃本次下载（目标位置已有的文件保持不变）并抛 `ChecksumMismatchException`，其 `FilePath` 为被丢弃的 `.partial` 路径；无法解析到哈希时 `DownloadResult.Verified = false`（设置 `RequireChecksum = true` 可改为直接失败，且在传输前就会失败）。
 - 私有仓库资产通过 API 端点 + `Accept: application/octet-stream` 下载，只要提供 Token 即可。
 
+### 运行安装程序
+
+当 Release 资产是安装程序（`.exe`/`.msi`）时，库可以在下载并校验通过后启动它。通过系统 Shell 启动（需要提权的安装程序会弹出正常的 UAC 提示），启动后立即返回、不等待——由安装程序自己负责关闭并重启你的应用。
+
+```csharp
+using GitHubReleaseUpdater.Installation;
+
+var check = await updater.CheckForUpdateAsync();
+if (check.IsUpdateAvailable)
+{
+    // 一步完成：下载 + 校验 + 启动。
+    await updater.DownloadAndLaunchInstallerAsync(check, downloadDir, InstallerLaunchOptions.InnoSetupSilent, progress);
+
+    // 或分两步，在下载与启动之间做自己的检查：
+    var file = await updater.DownloadAsync(check, downloadDir, progress);
+    await updater.LaunchInstallerAsync(file, new InstallerLaunchOptions { Arguments = "/S", RequireVerified = true });
+}
+```
+
+- `InstallerLaunchOptions`：`Arguments`、`WorkingDirectory`（默认为安装程序所在目录）、`RequireVerified`（拒绝启动无法校验校验和的安装程序）。`InnoSetupSilent`（`/SILENT /SP- /NORESTART`）与 `InnoSetupVerySilent` 为现成预设。
+- 下载失败、被取消或校验失败时，永远不会启动安装程序。启动前会重新计算文件哈希并与下载时记录的值比对，下载之后被替换或改动的文件（安装包通常位于用户可写目录，且常以管理员权限运行）不会被运行，会抛 `ChecksumMismatchException`。
+- `InstallerLaunchException`（派生自 `UpdaterException`）带 `FilePath` 与 `IsUserCancelled`——用户拒绝 UAC 提示时为 true，便于调用方与真正的失败区别对待。
+- 通过 `UpdaterOptions.InstallerLauncher`（`IInstallerLauncher`）可自定义或在测试中替换启动方式。
+
 ### 异常
 
 均派生自 `UpdaterException`：
@@ -366,6 +416,7 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 - `GitHubApiException` — 带 `StatusCode`、`IsRateLimited`、`RateLimitResetAt`。
 - `AssetNotFoundException` — 带 `AvailableAssets`。
 - `ChecksumMismatchException` — 带 `Expected` / `Actual`。
+- `InstallerLaunchException` — 带 `FilePath` / `IsUserCancelled`。
 
 `CheckForUpdateAsync()` 不会抛出上述任何异常（也不会抛出其他任何异常）——检查过程中遇到的所有异常（API 失败、抛异常的 `ILastCheckStore` 等）都会被捕获，并通过 `UpdateCheckResult.Success`/`Error` 返回，调用方不需要为它加 try/catch。调用方主动取消时仍会照常抛出 `OperationCanceledException`。`DownloadAsync()` 的抛异常约定保持不变，见上文。
 
@@ -407,6 +458,7 @@ src/GitHubReleaseUpdater/      类库（NuGet 包）
   Download/                    下载器与进度
   Verification/                校验
   LastCheck/                   ILastCheckStore 与 InMemoryLastCheckStore
+  Installation/                启动安装程序
   Exceptions/                  异常
 samples/GitHubReleaseUpdater.Cli/   示例命令行
 tests/GitHubReleaseUpdater.Tests/   xUnit 测试
