@@ -110,11 +110,17 @@ if (check.Throttled)
 >
 > **Breaking change:** `ILastCheckStore.SetSkippedVersionAsync` now takes a non-nullable `SemanticVersion`. A custom `ILastCheckStore` implementation must implement `ClearSkippedVersionAsync` directly instead of relying on the old `SetSkippedVersionAsync(null)` default; callers that passed `null` to clear the skipped version must call `ClearSkippedVersionAsync()` instead.
 
-### Automatic update flow (`GitHubReleaseUpdater.AutoUpdate`)
+### Automatic update flow (`GitHubReleaseUpdater.AutoUpdate` namespace)
 
-The separate `GitHubReleaseUpdater.AutoUpdate` package adds `UpdateController`, a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default.
+`UpdateController` is a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default. It lives in this package, in the `GitHubReleaseUpdater.AutoUpdate` namespace, and works in desktop, tray, console and service applications alike.
 
 ```csharp
+var updater = new ReleaseUpdater(new UpdaterOptions
+{
+    Owner = "me", Repo = "app", CurrentVersion = current,
+    LastCheckStore = new JsonFileLastCheckStore(statePath),
+    MinimumCheckInterval = TimeSpan.FromHours(6),
+});
 var controller = new UpdateController(updater, new MyPresenter(), new UpdateControllerOptions
 {
     IsAutoCheckEnabled = () => settings.CheckForUpdates,
@@ -125,7 +131,12 @@ await controller.CheckAsync(manual: true);    // "Check for updates" button: byp
 await controller.InstallAsync();              // "Update to x.y.z"
 ```
 
-`State` (`Idle`/`Checking`/`UpToDate`/`Available`/`Failed`/`Installing`) and `Available` describe the current situation; `Changed` fires on every change. A check or installation already running makes further calls do nothing. Call it from one thread (normally the UI thread). See the package's own README for details.
+- **States:** `State` is `Idle`, `Checking`, `UpToDate`, `Available`, `Failed` or `Installing`; `Available` holds the version found; `Changed` fires on every change.
+- **Automatic checks** announce a version once; **manual checks** bypass throttling and the skipped version, report "up to date" / "failed" and go straight to the confirmation.
+- A manual check requested while an automatic one runs is made when that one ends; an installation that is already running makes further calls do nothing.
+- **Verification is required by default** (`RequireVerifiedDownload`): an installer whose checksum could not be verified (no sidecar, no sums file, no digest from GitHub) is not started and the failure goes to `ReportInstallFailed`. Set it to false only if your releases cannot be verified.
+- Exceptions thrown by your presenter, a `Changed` handler or `IsAutoCheckEnabled` never leave the controller stuck; they go to `UpdateControllerOptions.OnError`, together with a failure to record the check time.
+- Call it from one thread (normally the UI thread); `Changed` and the presenter run on the caller's context.
 
 ### HttpClient reuse
 
@@ -382,11 +393,17 @@ if (check.Throttled)
 >
 > **破坏性变更：** `ILastCheckStore.SetSkippedVersionAsync` 现在接受非空的 `SemanticVersion`。自定义 `ILastCheckStore` 实现需要直接实现 `ClearSkippedVersionAsync`，不能再依赖旧的 `SetSkippedVersionAsync(null)` 默认实现；原本通过传 `null` 来清除跳过版本的调用方需要改为调用 `ClearSkippedVersionAsync()`。
 
-### 自动更新流程（`GitHubReleaseUpdater.AutoUpdate`）
+### 自动更新流程（`GitHubReleaseUpdater.AutoUpdate` 命名空间）
 
-独立的 `GitHubReleaseUpdater.AutoUpdate` 包提供 `UpdateController`：一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现。
+`UpdateController` 是一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现。它就在本包里，命名空间为 `GitHubReleaseUpdater.AutoUpdate`，桌面、托盘、控制台和服务类应用都可以使用。
 
 ```csharp
+var updater = new ReleaseUpdater(new UpdaterOptions
+{
+    Owner = "me", Repo = "app", CurrentVersion = current,
+    LastCheckStore = new JsonFileLastCheckStore(statePath),
+    MinimumCheckInterval = TimeSpan.FromHours(6),
+});
 var controller = new UpdateController(updater, new MyPresenter(), new UpdateControllerOptions
 {
     IsAutoCheckEnabled = () => settings.CheckForUpdates,
@@ -397,7 +414,12 @@ await controller.CheckAsync(manual: true);    // “检查更新”按钮：绕�
 await controller.InstallAsync();              // “更新到 x.y.z”
 ```
 
-`State`（`Idle`/`Checking`/`UpToDate`/`Available`/`Failed`/`Installing`）和 `Available` 描述当前情况，每次变化都会触发 `Changed`。已有检查或安装在运行时，再次调用什么都不做。请在同一线程（通常是 UI 线程）调用。详见该包自己的 README。
+- **状态：** `State` 为 `Idle`、`Checking`、`UpToDate`、`Available`、`Failed` 或 `Installing`；`Available` 是找到的版本；每次变化都会触发 `Changed`。
+- **自动检查**同一版本只通知一次；**手动检查**绕过节流和已跳过的版本，会报告“已是最新”或失败，发现新版本后直接进入确认。
+- 自动检查运行期间收到的手动检查，会在自动检查结束后立刻执行；已有安装在运行时，再次调用什么都不做。
+- **默认要求校验通过**（`RequireVerifiedDownload`）：校验和无法验证的安装程序（没有 sidecar、没有 sums 文件、GitHub 也没有给出 digest）不会被启动，失败交给 `ReportInstallFailed`。只有发布确实无法校验时才把它设为 false。
+- 展示层、`Changed` 处理器、`IsAutoCheckEnabled` 抛出的异常不会让控制器卡住，它们和记录检查时间失败一起交给 `UpdateControllerOptions.OnError`。
+- 请在同一线程（通常是 UI 线程）调用；`Changed` 和展示层运行在调用方的上下文里。
 
 ### HttpClient 复用
 
