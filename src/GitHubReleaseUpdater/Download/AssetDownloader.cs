@@ -182,6 +182,20 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
+    /// Deletes the partial file of an asset and its sidecar, so that the next download of it starts from the beginning.
+    /// Used when what was received so far came from a source that turned out to be unreliable.
+    /// </summary>
+    /// <param name="asset">The asset.</param>
+    /// <param name="directory">The directory it is downloaded to.</param>
+    internal void DiscardPartial(GitHubAsset asset, string directory)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        var partialPath = Path.Combine(directory, SanitizeFileName(asset.Name)) + PartialSuffix;
+        TryDelete(partialPath + MetaSuffix);
+        TryDelete(partialPath);
+    }
+
+    /// <summary>
     /// Shared implementation of <see cref="DownloadAsync"/> and <see cref="DownloadVerifiedAsync"/>. The returned
     /// hash is null unless <paramref name="computeSha256"/> is true.
     /// </summary>

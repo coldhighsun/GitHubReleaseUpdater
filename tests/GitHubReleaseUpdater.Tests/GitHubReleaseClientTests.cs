@@ -1,6 +1,7 @@
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.GitHub;
 using GitHubReleaseUpdater.GitHub.Models;
+using GitHubReleaseUpdater.Verification;
 using System.Net;
 
 namespace GitHubReleaseUpdater.Tests;
@@ -84,6 +85,365 @@ public class GitHubReleaseClientTests
         var buf = new byte[3];
         Assert.Equal(3, await stream.Stream.ReadAtLeastAsync(buf, 3));
         Assert.Contains(handler.Requests[0].Headers.Accept, a => a.MediaType == "application/octet-stream");
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_with_a_rewriter_downloads_from_the_other_address_without_the_token()
+    {
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", [1, 2, 3]);
+        using var client = new GitHubReleaseClient(null, "secret", "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+        };
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("mirror.test", request.RequestUri!.Host);
+        Assert.EndsWith("/releases/download/v1/a.zip", request.RequestUri.ToString(), StringComparison.Ordinal);
+        Assert.Null(request.Headers.Authorization);
+        Assert.Equal(3, stream.ContentLength);
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_passes_the_rewriter_of_its_options_to_its_client()
+    {
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", [1, 2, 3]);
+        using var updater = new ReleaseUpdater(new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            HttpClient = new HttpClient(handler),
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+        });
+        var asset = TestData.Release("v2", "a.zip").Assets[0];
+
+        await using var stream = await updater.Client.OpenAssetStreamAsync(asset);
+
+        Assert.Equal("mirror.test", Assert.Single(handler.Requests).RequestUri!.Host);
+    }
+
+    /// <summary>
+    /// An updater whose packages go through a mirror, and the folder it downloads to, removed when the test ends.
+    /// </summary>
+    private sealed class MirrorFixture : IDisposable
+    {
+        /// <summary>
+        /// Creates the fixture.
+        /// </summary>
+        /// <param name="handler">Stands in for the mirror and for GitHub.</param>
+        /// <param name="sha256">The checksum the package must have.</param>
+        /// <param name="retries">How many times the downloader repeats a failed attempt.</param>
+        public MirrorFixture(StubHttpHandler handler, string sha256, int retries = 0)
+        {
+            Directory = Path.Combine(Path.GetTempPath(), "ghru-mirror-" + Guid.NewGuid().ToString("N"));
+            Updater = new ReleaseUpdater(new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                HttpClient = new HttpClient(handler),
+                AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+                ChecksumProvider = new StaticChecksumProvider(sha256),
+                DownloadMaxRetryAttempts = retries,
+                DownloadRetryDelay = TimeSpan.Zero,
+            });
+        }
+
+        /// <summary>
+        /// Gets the updater.
+        /// </summary>
+        public ReleaseUpdater Updater { get; }
+
+        /// <summary>
+        /// Gets the download folder.
+        /// </summary>
+        public string Directory { get; }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            Updater.Dispose();
+            if (System.IO.Directory.Exists(Directory))
+            {
+                System.IO.Directory.Delete(Directory, recursive: true);
+            }
+        }
+    }
+
+    private static string Sha256Of(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+
+    [Fact]
+    public async Task ReleaseUpdater_downloads_from_github_when_the_mirror_serves_the_wrong_size()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", [9, 9, 9]).OnBytes("/releases/assets/1", good);
+        using var fixture = new MirrorFixture(handler, Sha256Of(good));
+        var release = TestData.Release("v2", "a.zip");
+
+        var result = await fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory);
+
+        Assert.True(result.Verified);
+        Assert.Equal(good, await File.ReadAllBytesAsync(result.FilePath));
+        Assert.Equal(["mirror.test", "api.github.com"], handler.Requests.Select(r => r.RequestUri!.Host).ToArray());
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_downloads_from_github_when_the_mirror_serves_other_content()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", Enumerable.Repeat((byte)1, 10).ToArray()).OnBytes("/releases/assets/1", good);
+        using var fixture = new MirrorFixture(handler, Sha256Of(good));
+        var release = TestData.Release("v2", "a.zip");
+
+        var result = await fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory);
+
+        Assert.Equal(good, await File.ReadAllBytesAsync(result.FilePath));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_fails_when_the_mirror_and_github_both_serve_other_content()
+    {
+        var handler = new StubHttpHandler()
+            .OnBytes("mirror.test/", Enumerable.Repeat((byte)1, 10).ToArray())
+            .OnBytes("/releases/assets/1", Enumerable.Repeat((byte)2, 10).ToArray());
+        using var fixture = new MirrorFixture(handler, Sha256Of(new byte[10]));
+        var release = TestData.Release("v2", "a.zip");
+
+        await Assert.ThrowsAsync<ChecksumMismatchException>(() => fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory));
+
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_gives_up_on_the_mirror_after_one_attempt_whatever_the_retries()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", [9, 9, 9]).OnBytes("/releases/assets/1", good);
+        using var fixture = new MirrorFixture(handler, Sha256Of(good), retries: 3);
+        var release = TestData.Release("v2", "a.zip");
+
+        await fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory);
+
+        Assert.Single(handler.Requests, r => r.RequestUri!.Host == "mirror.test");
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_does_not_try_github_for_a_failure_on_this_computer()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", good).OnBytes("/releases/assets/1", good);
+        using var fixture = new MirrorFixture(handler, Sha256Of(good));
+        var release = TestData.Release("v2", "a.zip");
+        Directory.CreateDirectory(Path.Combine(fixture.Directory, "a.zip"));
+
+        await Assert.ThrowsAnyAsync<Exception>(() => fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory));
+
+        Assert.DoesNotContain(handler.Requests, r => r.RequestUri!.Host == "api.github.com");
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_does_not_use_the_mirror_without_a_checksum()
+    {
+        var handler = new StubHttpHandler()
+            .OnBytes("mirror.test/", Enumerable.Repeat((byte)1, 10).ToArray())
+            .OnBytes("/releases/assets/1", new byte[10]);
+        using var updater = new ReleaseUpdater(new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            HttpClient = new HttpClient(handler),
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+            ChecksumProvider = NoChecksumProvider.Instance,
+        });
+        var dir = Path.Combine(Path.GetTempPath(), "ghru-mirror-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var release = TestData.Release("v2", "a.zip");
+
+            var result = await updater.DownloadAsync(release, release.Assets[0], dir);
+
+            Assert.False(result.Verified);
+            Assert.Equal(new byte[10], await File.ReadAllBytesAsync(result.FilePath));
+            Assert.DoesNotContain(handler.Requests, r => r.RequestUri!.Host == "mirror.test");
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_asks_the_rewriter_once_per_download()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler().OnBytes("mirror.test/", [9, 9, 9]).OnBytes("/releases/assets/1", good);
+        var asked = 0;
+        using var updater = new ReleaseUpdater(new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            HttpClient = new HttpClient(handler),
+            AssetUrlRewriter = url =>
+            {
+                asked++;
+                return new Uri("https://mirror.test/" + url);
+            },
+            ChecksumProvider = new StaticChecksumProvider(Sha256Of(good)),
+            DownloadRetryDelay = TimeSpan.Zero,
+        });
+        var dir = Path.Combine(Path.GetTempPath(), "ghru-mirror-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var release = TestData.Release("v2", "a.zip");
+
+            await updater.DownloadAsync(release, release.Assets[0], dir);
+
+            Assert.Equal(1, asked);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReleaseUpdater_discards_what_a_broken_mirror_transfer_left_before_using_github()
+    {
+        var good = new byte[10];
+        var handler = new StubHttpHandler()
+            .OnBytes("mirror.test/", Enumerable.Repeat((byte)7, 6).ToArray(), includeLength: false)
+            .OnBytes("/releases/assets/1", good);
+        using var fixture = new MirrorFixture(handler, Sha256Of(good));
+        var release = TestData.Release("v2", "a.zip");
+
+        var result = await fixture.Updater.DownloadAsync(release, release.Assets[0], fixture.Directory);
+
+        Assert.Equal(good, await File.ReadAllBytesAsync(result.FilePath));
+        Assert.Empty(Directory.GetFiles(fixture.Directory, "*.partial*"));
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_with_a_rewriter_that_throws_downloads_from_github()
+    {
+        var handler = new StubHttpHandler().OnBytes("/releases/assets/1", [1, 2, 3]);
+        using var client = new GitHubReleaseClient(null, null, "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = _ => throw new InvalidOperationException("no mirror list"),
+        };
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        Assert.Equal("api.github.com", Assert.Single(handler.Requests).RequestUri!.Host);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_without_a_public_address_does_not_call_the_rewriter()
+    {
+        var handler = new StubHttpHandler().OnBytes("/releases/assets/1", [1, 2, 3]);
+        var called = false;
+        using var client = new GitHubReleaseClient(null, null, "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = url =>
+            {
+                called = true;
+                return url;
+            },
+        };
+        var asset = new GitHubAsset { Id = 1, Name = "a.zip", Size = 3, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        Assert.False(called);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_resumes_through_the_other_address_with_a_range_and_without_the_token()
+    {
+        var handler = new StubHttpHandler().OnRangeAwareBytes("mirror.test/", [1, 2, 3, 4, 5]);
+        using var client = new GitHubReleaseClient(null, "secret", "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+        };
+        var asset = TestData.Release("v1", 5, "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset, rangeStart: 2);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(2, request.Headers.Range!.Ranges.Single().From);
+        Assert.Null(request.Headers.Authorization);
+        Assert.True(stream.IsPartial);
+        Assert.Equal(2, stream.RangeStart);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_falls_back_to_github_when_the_other_address_fails()
+    {
+        var handler = new StubHttpHandler()
+            .On("mirror.test/", HttpStatusCode.BadGateway, "bad gateway")
+            .OnBytes("/releases/assets/1", [1, 2, 3]);
+        using var client = new GitHubReleaseClient(null, "secret", "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+        };
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("api.github.com", handler.Requests[1].RequestUri!.Host);
+        Assert.NotNull(handler.Requests[1].Headers.Authorization);
+        Assert.Equal(3, stream.ContentLength);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_with_a_rewriter_that_keeps_the_address_downloads_as_usual()
+    {
+        var handler = new StubHttpHandler().OnBytes("/releases/assets/1", [1, 2, 3]);
+        using var client = new GitHubReleaseClient(null, null, "tests", new HttpClient(handler), null) { AssetUrlRewriter = url => url };
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await using var stream = await client.OpenAssetStreamAsync(asset);
+
+        Assert.Contains("/releases/assets/1", Assert.Single(handler.Requests).RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OpenAssetStream_refuses_a_rewritten_address_that_is_not_http()
+    {
+        var handler = new StubHttpHandler().OnBytes("/releases/assets/1", [1, 2, 3]);
+        using var client = new GitHubReleaseClient(null, null, "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = _ => new Uri("file:///C:/evil.exe"),
+        };
+        var asset = TestData.Release("v1", "a.zip").Assets[0];
+
+        await Assert.ThrowsAsync<UpdaterException>(() => client.OpenAssetStreamAsync(asset));
+
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ReadAssetText_is_not_rewritten()
+    {
+        var handler = new StubHttpHandler().On("/releases/assets/2", HttpStatusCode.OK, "abc  a.zip", "text/plain");
+        using var client = new GitHubReleaseClient(null, null, "tests", new HttpClient(handler), null)
+        {
+            AssetUrlRewriter = url => new Uri("https://mirror.test/" + url),
+        };
+        var asset = TestData.Release("v1", "a.zip", "SHA256SUMS").Assets[1];
+
+        var text = await client.ReadAssetTextAsync(asset);
+
+        Assert.Equal("abc  a.zip", text);
+        Assert.Equal("api.github.com", Assert.Single(handler.Requests).RequestUri!.Host);
     }
 
     [Fact]
