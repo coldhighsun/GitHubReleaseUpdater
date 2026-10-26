@@ -110,6 +110,10 @@ if (check.Throttled)
 >
 > **Breaking change:** `ILastCheckStore.SetSkippedVersionAsync` now takes a non-nullable `SemanticVersion`. A custom `ILastCheckStore` implementation must implement `ClearSkippedVersionAsync` directly instead of relying on the old `SetSkippedVersionAsync(null)` default; callers that passed `null` to clear the skipped version must call `ClearSkippedVersionAsync()` instead.
 
+> **Behavior change in 0.5.0:** a release newer than the running version but without a package the selector accepts no longer fails the check: `UpdateController` stays in `Available` with `HasInstaller == false` (the version and its `Release` are kept). Code that treated `Failed` as "no package" must test `HasInstaller` instead. `UpdateState` also gained `Downloading` and `Downloaded`.
+>
+> **Behavior change after 0.5.0:** when `MinimumCheckInterval` is not longer than `CheckInterval`, `RunAsync` lets only its first round be throttled (before, a check interval equal to the minimum interval skipped every other round).
+
 ### Automatic update flow (`GitHubReleaseUpdater.AutoUpdate` namespace)
 
 `UpdateController` is a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default (`ConfirmInstallAsync` answers no, so nothing is installed until you ask the user). It lives in this package, in the `GitHubReleaseUpdater.AutoUpdate` namespace, and works in desktop, tray, console and service applications alike.
@@ -139,15 +143,28 @@ await controller.InstallAsync();              // "Update to x.y.z"
 - `DownloadAsync()` fetches and verifies the installer ahead of time (`State` becomes `Downloaded`); `InstallAsync()` then starts it without downloading again.
 - `BeforeInstallAsync` (with `BeforeInstallTimeout`, default 10 s) runs just before the installer starts, e.g. to save state; its failure never stops the installation.
 - `WatchInstaller = true` keeps `InstallAsync()` waiting until the installer process ended (plus `InstallerGracePeriod`, default 30 s). If the app still runs, the state returns to `Downloaded` and `IUpdatePresenter.InstallerEnded` is called, so the user can try again.
-- `CleanDownloadDirectory = true` deletes earlier downloads before a new one (keeping a resumable `.partial`) and once the app is up to date. Use it only for a directory dedicated to updates.
+- `CleanDownloadDirectory = true` deletes earlier downloads before a new one (keeping a resumable `.partial`) and once the app is up to date, trying again in every round of `RunAsync` (also when the checks are throttled or switched off) for files that were still in use. Use it only for a directory dedicated to updates.
 - A store that also implements `IPendingUpdateStore` (`JsonFileLastCheckStore` and `InMemoryLastCheckStore` do) remembers that a newer release was found, so the next check is not throttled and the announcement survives a restart.
 - `InstallerLaunchOptions.InnoSetupSilent.WithArguments("/CLOSEAPPLICATIONS /RELAUNCH=1")` appends your installer's own switches to a preset.
 - **Inno Setup (silent update that restarts the app):** start the installer with `InstallerLaunchOptions.InnoSetupSilent`, close the application from `IUpdatePresenter.InstallerStarted` (the installer cannot replace files that are in use), and give the `[Run]` entry of your `.iss` that starts the application no `skipifsilent` flag, so the silent installation starts it again. If the installer should close the application itself, turn on `CloseApplications` in the `.iss` or pass `/CLOSEAPPLICATIONS` through `WithArguments`.
 - A release newer than the running version but without a package the selector accepts is kept: `State` is `Available`, `HasInstaller` is false, `Available` holds the version (and its `Release`, for notes and the page link). Nothing is announced; a manual check passes an `AssetNotFoundException` to `ReportCheckFailed`. `DownloadAsync()` and `InstallAsync()` download and start nothing for it and report an `AssetNotFoundException` to `ReportInstallFailed`, so show the install entry only while `HasInstaller` is true.
 - `LaunchInstaller = false` is for packages that are not installers (an archive the user unpacks): `InstallAsync()` then only downloads and verifies, stops in `Downloaded`, leaves the file in `DownloadedFile` and calls `IUpdatePresenter.PackageDownloaded(update, filePath)`. `DownloadAsync()` calls it too; an installation that starts the installer does not.
+- `LastError` holds why the last check, download or installation failed (set together with the state change, cleared by the next one) and `Progress` the latest `DownloadProgress`, with a `ProgressChanged` event for every chunk; an application does not need to keep that from the presenter callbacks.
+- `AskToInstallAfterManualCheck = false` makes a manual check only find out (read `Available` when `Changed` is raised; the presenter is not told of the found version); call `InstallAsync()`/`DownloadAsync()` when the user decides. `SkipChecksWhileUpdateKnown = true` stops the background rounds from asking again while a newer version is known.
+- When `MinimumCheckInterval` is not longer than `CheckInterval`, `RunAsync` lets only its first round (after a restart) be throttled; later rounds are already spaced by `CheckInterval`, and would otherwise be skipped every other time because the last check is recorded when it ends.
 - **Verification is required by default** (`RequireVerifiedDownload`): an installer whose checksum could not be verified (no sidecar, no sums file, no digest from GitHub) is not started and the failure goes to `ReportInstallFailed`. Set it to false only if your releases cannot be verified.
 - Exceptions thrown by your presenter, a `Changed` handler or `IsAutoCheckEnabled` never leave the controller stuck; they go to `UpdateControllerOptions.OnError`, together with a failure to record the check time.
 - Call it from one thread (normally the UI thread); `Changed` and the presenter run on the caller's context.
+
+### Downloading from a mirror
+
+Where GitHub's download servers are slow or blocked, `UpdaterOptions.AssetUrlRewriter` maps the public download address of a package to another one:
+
+```csharp
+AssetUrlRewriter = url => new Uri("https://mirror.example.com/" + url),   // return the same address to download as usual
+```
+
+Only the package is fetched from there, and only when its checksum is known (without one it comes from GitHub, since nothing would tell a mirror's bytes from the real package); the function is asked once per download and should answer the same for the same address. The token is never sent to the other address, checksum files and release data still come from GitHub (so the checksum still protects against a mirror that serves something else), and when the other address cannot be opened (network error, timeout, error status) or delivers something unusable (wrong size, failed checksum, a connection that breaks after the retries) the package is downloaded from GitHub itself once. A rewriter that throws counts as no other address. The result must be an absolute http or https address, otherwise the download fails with `UpdaterException`. The option is ignored when you pass your own `IGitHubReleaseClient` to `ReleaseUpdater`; set `GitHubReleaseClient.AssetUrlRewriter` on your client instead.
 
 ### HttpClient reuse
 
@@ -404,6 +421,10 @@ if (check.Throttled)
 >
 > **破坏性变更：** `ILastCheckStore.SetSkippedVersionAsync` 现在接受非空的 `SemanticVersion`。自定义 `ILastCheckStore` 实现需要直接实现 `ClearSkippedVersionAsync`，不能再依赖旧的 `SetSkippedVersionAsync(null)` 默认实现；原本通过传 `null` 来清除跳过版本的调用方需要改为调用 `ClearSkippedVersionAsync()`。
 
+> **0.5.0 的行为变化：** 比当前版本新、但没有选择器接受的安装包的发布不再让检查失败：`UpdateController` 停在 `Available`，`HasInstaller` 为 false（版本及其 `Release` 会保留）。以前把 `Failed` 当作“没有安装包”的代码要改为检查 `HasInstaller`。`UpdateState` 还新增了 `Downloading` 和 `Downloaded`。
+>
+> **0.5.0 之后的行为变化：** 当 `MinimumCheckInterval` 不长于 `CheckInterval` 时，`RunAsync` 只让第一轮受限流约束（以前检查间隔等于最短间隔时会每隔一轮被跳过）。
+
 ### 自动更新流程（`GitHubReleaseUpdater.AutoUpdate` 命名空间）
 
 `UpdateController` 是一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现（`ConfirmInstallAsync` 默认回答“否”，所以在你询问用户之前不会安装任何东西）。它就在本包里，命名空间为 `GitHubReleaseUpdater.AutoUpdate`，桌面、托盘、控制台和服务类应用都可以使用。
@@ -433,15 +454,28 @@ await controller.InstallAsync();              // “更新到 x.y.z”
 - `DownloadAsync()` 提前下载并校验安装程序（`State` 变为 `Downloaded`）；之后 `InstallAsync()` 直接启动它，不会再下载一次。
 - `BeforeInstallAsync`（配合 `BeforeInstallTimeout`，默认 10 秒）在安装程序启动前执行，例如保存状态；它失败不会阻止安装。
 - `WatchInstaller = true` 时，`InstallAsync()` 会等到安装程序进程结束（再加 `InstallerGracePeriod`，默认 30 秒）。如果应用仍在运行，状态回到 `Downloaded` 并调用 `IUpdatePresenter.InstallerEnded`，用户可以重试。
-- `CleanDownloadDirectory = true` 会在新下载前，以及确认已是最新版本时，删除之前的下载（保留可续传的 `.partial`）。只对专用于更新的目录启用。
+- `CleanDownloadDirectory = true` 会在新下载前，以及确认已是最新版本时，删除之前的下载（保留可续传的 `.partial`）；`RunAsync` 的每一轮（即使检查被限流或关闭）都会对仍被占用的文件重试。只对专用于更新的目录启用。
 - 同时实现 `IPendingUpdateStore` 的存储（`JsonFileLastCheckStore` 和 `InMemoryLastCheckStore` 都实现了）会记住“已发现新版本”，下次检查不被节流，提示在重启后依然出现。
 - `InstallerLaunchOptions.InnoSetupSilent.WithArguments("/CLOSEAPPLICATIONS /RELAUNCH=1")` 可以在预设上追加安装程序自己的参数。
 - **Inno Setup（静默更新后自动重启应用）：** 用 `InstallerLaunchOptions.InnoSetupSilent` 启动安装程序，在 `IUpdatePresenter.InstallerStarted` 里关闭应用（安装程序无法替换正在使用的文件），并且不要给 `.iss` 里启动应用的 `[Run]` 条目加 `skipifsilent`，这样静默安装结束后会再次启动应用。如果希望由安装程序来关闭应用，可以在 `.iss` 里开启 `CloseApplications`，或通过 `WithArguments` 传入 `/CLOSEAPPLICATIONS`。
 - 比当前版本新、但没有选择器接受的安装包的发布会被保留：`State` 为 `Available`，`HasInstaller` 为 false，`Available` 带着该版本（含用于说明和发布页链接的 `Release`）。不会通知；手动检查会把 `AssetNotFoundException` 交给 `ReportCheckFailed`。对它调用 `DownloadAsync()` 和 `InstallAsync()` 不会下载或启动任何东西，只会把 `AssetNotFoundException` 交给 `ReportInstallFailed`；因此只在 `HasInstaller` 为 true 时才显示安装入口。
 - `LaunchInstaller = false` 用于不是安装程序的包（用户自己解压的压缩包）：`InstallAsync()` 只下载并校验，停在 `Downloaded`，文件路径在 `DownloadedFile`，并调用 `IUpdatePresenter.PackageDownloaded(update, filePath)`。`DownloadAsync()` 成功后也会调用；直接启动安装程序的安装则不会。
+- `LastError` 保存最近一次检查、下载或安装失败的原因（随状态变化一起设置，下一次状态变化时清空），`Progress` 是最新的 `DownloadProgress`，每收到一块数据触发 `ProgressChanged`；应用不必再靠 presenter 回调自己记录这些。
+- `AskToInstallAfterManualCheck = false` 让手动检查只查找（`Changed` 触发时读取 `Available`；presenter 不会收到“找到新版本”的通知），用户决定后再调用 `InstallAsync()`/`DownloadAsync()`。`SkipChecksWhileUpdateKnown = true` 让后台轮次在已知有新版本时不再重复询问。
+- 当 `MinimumCheckInterval` 不长于 `CheckInterval` 时，`RunAsync` 只让第一轮（重启之后）受限流约束；之后的轮次本来就由 `CheckInterval` 隔开，否则会因为“上次检查在结束时才记录”而每隔一次被跳过。
 - **默认要求校验通过**（`RequireVerifiedDownload`）：校验和无法验证的安装程序（没有 sidecar、没有 sums 文件、GitHub 也没有给出 digest）不会被启动，失败交给 `ReportInstallFailed`。只有发布确实无法校验时才把它设为 false。
 - 展示层、`Changed` 处理器、`IsAutoCheckEnabled` 抛出的异常不会让控制器卡住，它们和记录检查时间失败一起交给 `UpdateControllerOptions.OnError`。
 - 请在同一线程（通常是 UI 线程）调用；`Changed` 和展示层运行在调用方的上下文里。
+
+### 从镜像下载
+
+GitHub 的下载服务器很慢或被屏蔽时，可以用 `UpdaterOptions.AssetUrlRewriter` 把安装包的公开下载地址映射到另一个地址：
+
+```csharp
+AssetUrlRewriter = url => new Uri("https://mirror.example.com/" + url),   // 返回原地址则照常下载
+```
+
+只有安装包从那里下载，并且只在已知校验和时才这样（没有校验和就从 GitHub 下载，因为无法区分镜像的内容和真正的安装包）；每次下载只会询问该函数一次，对同一地址应给出相同的答案。令牌永远不会发给另一个地址；校验和文件和发布信息仍然来自 GitHub（所以校验和依然能防范镜像提供了别的内容）；另一个地址打不开（网络错误、超时、错误状态），或给出的内容不可用（大小不对、校验和不符、重试后连接仍然中断）时，会改从 GitHub 本身下载一次。抛异常的回调视同没有另一个地址。返回值必须是绝对的 http 或 https 地址，否则下载以 `UpdaterException` 失败。如果你给 `ReleaseUpdater` 传入了自己的 `IGitHubReleaseClient`，该选项会被忽略，请改为设置你的客户端的 `GitHubReleaseClient.AssetUrlRewriter`。
 
 ### HttpClient 复用
 
