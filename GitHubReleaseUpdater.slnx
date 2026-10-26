@@ -16,6 +16,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/GitHubReleaseUpdater/GitHubReleaseUpdater.csproj" />
+    <Project Path="src/GitHubReleaseUpdater.AutoUpdate/GitHubReleaseUpdater.AutoUpdate.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/GitHubReleaseUpdater.Tests/GitHubReleaseUpdater.Tests.csproj" />
