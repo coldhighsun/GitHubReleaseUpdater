@@ -90,4 +90,16 @@ public interface IUpdatePresenter
     void InstallerEnded(AvailableUpdate update)
     {
     }
+
+    /// <summary>
+    /// Tells the user that the package of a version was downloaded and verified and is left for them to use, because the
+    /// controller does not start it: after <see cref="UpdateController.DownloadAsync"/>, or after
+    /// <see cref="UpdateController.InstallAsync"/> with <see cref="UpdateControllerOptions.LaunchInstaller"/> turned off,
+    /// for example an archive to unpack. Not called when <see cref="UpdateController.InstallAsync"/> starts the installer.
+    /// </summary>
+    /// <param name="update">The release that was downloaded.</param>
+    /// <param name="filePath">The full path of the downloaded file.</param>
+    void PackageDownloaded(AvailableUpdate update, string filePath)
+    {
+    }
 }

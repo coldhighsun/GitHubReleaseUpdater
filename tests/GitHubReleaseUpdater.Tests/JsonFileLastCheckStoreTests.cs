@@ -228,4 +228,72 @@ public sealed class JsonFileLastCheckStoreTests : IDisposable
 
         Assert.Equal(DateTime.UnixEpoch, File.GetLastWriteTimeUtc(StatePath));
     }
+
+    /// <summary>
+    /// Sweeping deletes old temporary files of the store and leaves young ones, the state file and other files alone.
+    /// </summary>
+    [Fact]
+    public async Task Sweep_deletes_only_old_temporary_files_of_the_store()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+        var old = StatePath + ".aaa.tmp";
+        var young = StatePath + ".bbb.tmp";
+        var other = Path.Combine(Path.GetDirectoryName(StatePath)!, "other.tmp");
+        foreach (var file in new[] { old, young, other })
+        {
+            await File.WriteAllTextAsync(file, "x", TestContext.Current.CancellationToken);
+        }
+
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddHours(-1));
+
+        store.SweepStaleTemps(TimeSpan.FromMinutes(1));
+
+        Assert.False(File.Exists(old));
+        Assert.True(File.Exists(young));
+        Assert.True(File.Exists(other));
+        Assert.True(File.Exists(StatePath));
+    }
+
+    /// <summary>
+    /// A write that follows a failed temp-file delete sweeps up the old leftovers by itself.
+    /// </summary>
+    [Fact]
+    public async Task Write_after_a_failed_temp_delete_sweeps_old_leftovers()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+        var old = StatePath + ".ccc.tmp";
+        await File.WriteAllTextAsync(old, "x", TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddHours(-1));
+        store.HasLeftoverTemps = true;
+
+        await store.SetUpdatePendingAsync(false, TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(old));
+        Assert.False(store.HasLeftoverTemps);
+    }
+
+    /// <summary>
+    /// A sweep that leaves a young temporary file keeps the leftover flag, and one that finds nothing left clears it.
+    /// </summary>
+    [Fact]
+    public async Task Sweep_keeps_the_flag_only_while_something_is_left()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+        var young = StatePath + ".ddd.tmp";
+        await File.WriteAllTextAsync(young, "x", TestContext.Current.CancellationToken);
+        store.HasLeftoverTemps = true;
+
+        store.SweepStaleTemps(TimeSpan.FromMinutes(1));
+
+        Assert.True(store.HasLeftoverTemps);
+
+        File.SetLastWriteTimeUtc(young, DateTime.UtcNow.AddHours(-1));
+        store.SweepStaleTemps(TimeSpan.FromMinutes(1));
+
+        Assert.False(store.HasLeftoverTemps);
+        Assert.False(File.Exists(young));
+    }
 }
