@@ -171,7 +171,7 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
-    /// Without an installer an automatic check announces nothing, and downloading or installing does nothing.
+    /// Without an installer an automatic check announces nothing, and downloading or installing starts nothing but reports why.
     /// </summary>
     [Fact]
     public async Task Release_without_an_installer_is_not_announced_and_cannot_be_installed()
@@ -188,6 +188,9 @@ public sealed class UpdateControllerTests : IDisposable
         Assert.Empty(_presenter.Failures);
         Assert.Equal(0, _presenter.Confirmations);
         Assert.Empty(_launcher.Launched);
+        // Asking for the download or the installation is not met with silence: each is reported as a failure.
+        Assert.Equal(2, _presenter.InstallFailures.Count);
+        Assert.All(_presenter.InstallFailures, error => Assert.IsType<AssetNotFoundException>(error));
     }
 
     /// <summary>

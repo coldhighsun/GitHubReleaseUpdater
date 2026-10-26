@@ -314,8 +314,14 @@ public sealed class UpdateController
     public async Task DownloadAsync(CancellationToken cancellationToken = default)
     {
         var check = _lastCheck;
-        if (_installing || State != UpdateState.Available || check?.Update is not { SelectedAsset: not null } update)
+        if (_installing || State != UpdateState.Available || check?.Update is not { } update)
         {
+            return;
+        }
+
+        if (update.SelectedAsset is null)
+        {
+            ReportNoPackage(update);
             return;
         }
 
@@ -364,8 +370,14 @@ public sealed class UpdateController
     public async Task InstallAsync(CancellationToken cancellationToken = default)
     {
         var check = _lastCheck;
-        if (_installing || State is UpdateState.Checking or UpdateState.Downloading || check?.Update is not { SelectedAsset: not null } update)
+        if (_installing || State is UpdateState.Checking or UpdateState.Downloading || check?.Update is not { } update)
         {
+            return;
+        }
+
+        if (update.SelectedAsset is null)
+        {
+            ReportNoPackage(update);
             return;
         }
 
@@ -436,6 +448,17 @@ public sealed class UpdateController
         {
             _installing = false;
         }
+    }
+
+    /// <summary>
+    /// Tells the presenter that a version cannot be downloaded or installed because its release has no package the
+    /// selector accepts, so a request for it does not end in silence.
+    /// </summary>
+    /// <param name="update">The release without a package.</param>
+    private void ReportNoPackage(AvailableUpdate update)
+    {
+        var error = new AssetNotFoundException($"Release {update.Version} has no asset the selector accepts.", update.Release.Assets.Select(a => a.Name).ToArray());
+        Present(() => _presenter.ReportInstallFailed(update, error));
     }
 
     /// <summary>
