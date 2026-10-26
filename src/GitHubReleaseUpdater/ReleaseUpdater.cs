@@ -57,6 +57,11 @@ public sealed class ReleaseUpdater : IDisposable
     private readonly IAssetSelector _selector;
 
     /// <summary>
+    /// The clock used for throttling and for the recorded time of a check.
+    /// </summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>
     /// Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.
     /// </summary>
     public ReleaseUpdater(UpdaterOptions options)
@@ -91,6 +96,7 @@ public sealed class ReleaseUpdater : IDisposable
         _client = client;
         _ownsClient = ownsClient;
         _selector = options.AssetSelector ?? new RuntimeAssetSelector();
+        _time = options.TimeProvider ?? TimeProvider.System;
         _checksums = options.ChecksumProvider ?? new ReleaseChecksumProvider(client);
         _installerLauncher = options.InstallerLauncher ?? new ProcessInstallerLauncher();
         _downloader = new AssetDownloader(client)
@@ -140,7 +146,7 @@ public sealed class ReleaseUpdater : IDisposable
             if (store is not null && !bypassThrottle && _options.MinimumCheckInterval is { } interval)
             {
                 var lastChecked = await store.GetLastCheckedAtAsync(cancellationToken).ConfigureAwait(false);
-                var now = DateTimeOffset.UtcNow;
+                var now = _time.GetUtcNow();
                 // A last-check time in the future (clock moved back, or a corrupt store) must not suppress checks
                 // until the clock catches up, so only throttle when it lies within the past interval.
                 if (lastChecked is { } last && last <= now && now - last < interval)
@@ -200,10 +206,22 @@ public sealed class ReleaseUpdater : IDisposable
             if (isUpdateAvailable)
                 asset = _selector.Select(best!);
 
+            // Failing to note the time must not throw away a check that succeeded; the worst outcome is that the next
+            // call is not throttled. The failure is not lost: it is reported on the result.
+            Exception? recordError = null;
             if (store is not null)
-                await store.SetLastCheckedAtAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+            {
+                try
+                {
+                    await store.SetLastCheckedAtAsync(_time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    recordError = ex;
+                }
+            }
 
-            return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable);
+            return new UpdateCheckResult(_options.CurrentVersion, bestVersion, best, asset, skipped, isUpdateAvailable) { LastCheckStoreError = recordError };
         }
         // Only the caller's own cancellation escapes; any other OperationCanceledException (a handler-level timeout,
         // HttpClient.CancelPendingRequests) is an ordinary failure under the "never throws" contract.

@@ -132,6 +132,13 @@ public sealed class UpdateCheckResult
     public Exception? Error { get; }
 
     /// <summary>
+    /// The exception thrown by <c>ILastCheckStore.SetLastCheckedAtAsync</c> when recording the time of this check, or
+    /// null if it was recorded (or there is no store). The check itself succeeded, so <see cref="Success"/> is still
+    /// true; but while this is set the next call is not throttled, which callers may want to log.
+    /// </summary>
+    public Exception? LastCheckStoreError { get; internal init; }
+
+    /// <summary>
     /// Builds a result reporting that no check was performed because it was too soon since the last one.
     /// </summary>
     internal static UpdateCheckResult ThrottledResult(SemanticVersion current) => new(current, throttled: true);

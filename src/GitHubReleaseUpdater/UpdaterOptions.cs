@@ -65,6 +65,12 @@ public sealed class UpdaterOptions
     public TimeSpan? MinimumCheckInterval { get; init; }
 
     /// <summary>
+    /// The clock used for <see cref="MinimumCheckInterval"/> and for the time recorded in
+    /// <see cref="LastCheckStore"/>. Defaults to <see cref="System.TimeProvider.System"/>; tests can pass a fake one.
+    /// </summary>
+    public TimeProvider? TimeProvider { get; init; }
+
+    /// <summary>
     /// Extra attempts <see cref="ReleaseUpdater.DownloadAsync(UpdateCheckResult, string, IProgress{Download.DownloadProgress}?, CancellationToken)"/>
     /// makes after a failed download before giving up. A transient failure (network I/O error, request timeout,
     /// or a truncated body) is retried with exponential backoff starting at <see cref="DownloadRetryDelay"/>; a
