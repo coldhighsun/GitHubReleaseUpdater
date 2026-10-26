@@ -20,6 +20,17 @@ public sealed class RuntimeAssetSelector : IAssetSelector
     private readonly IReadOnlyCollection<string> _preferredExtensions;
 
     /// <summary>
+    /// When true, an asset whose file name names neither an OS nor an architecture (for example <c>MyApp-Setup.exe</c>)
+    /// may be chosen if no asset matches the runtime; it ranks below every asset that does. Only files that look like
+    /// something to install on the target OS are considered (<c>.exe</c>, <c>.msi</c>, <c>.msix</c>, <c>.appx</c> on
+    /// Windows; <c>.dmg</c>, <c>.pkg</c> on macOS; <c>.deb</c>, <c>.rpm</c>, <c>.appimage</c> on Linux) plus any
+    /// extension passed as a preferred extension, so notes, symbols or source archives are never picked. Assets that
+    /// name a different OS or architecture and sidecar files are still never chosen. Defaults to false, so a name is
+    /// never guessed unless the caller opts in; use it for releases that publish a single installer for one platform.
+    /// </summary>
+    public bool AllowUnknownPlatform { get; init; }
+
+    /// <summary>
     /// Creates a selector for the current runtime.
     /// </summary>
     public RuntimeAssetSelector() : this(RuntimeInfo.Current) { }
@@ -87,7 +98,16 @@ public sealed class RuntimeAssetSelector : IAssetSelector
         var score = 0;
         if (osHit) score += 100;
         if (archHit) score += 50;
-        if (!osHit && !archHit) return 0;
+        var unknownPlatform = !osHit && !archHit;
+        if (unknownPlatform)
+        {
+            if (!AllowUnknownPlatform || !AssetPlatformDetector.Detect(name).IsUnknown || !LooksInstallable(name))
+            {
+                return 0;
+            }
+
+            score = 1;
+        }
 
         // Extension preference (earlier = better).
         var lower = name.ToLowerInvariant();
@@ -106,6 +126,41 @@ public sealed class RuntimeAssetSelector : IAssetSelector
         if (_runtime.Os.Equals("win", StringComparison.OrdinalIgnoreCase) && (lower.EndsWith(".msi", StringComparison.Ordinal) || lower.EndsWith(".zip", StringComparison.Ordinal))) score += 1;
         return score;
     }
+
+    /// <summary>
+    /// Whether a platform-less file name has an extension that is something to install on the target OS or one the caller
+    /// asked for.
+    /// </summary>
+    /// <param name="name">The asset file name.</param>
+    /// <returns>True if the file may be chosen as a platform-less installer.</returns>
+    private bool LooksInstallable(string name)
+    {
+        var lower = name.ToLowerInvariant();
+        var own = _runtime.Os.ToLowerInvariant() switch
+        {
+            "win" => InstallableOnWindows,
+            "osx" => InstallableOnMac,
+            "linux" => InstallableOnLinux,
+            _ => [],
+        };
+        return own.Any(e => lower.EndsWith(e, StringComparison.Ordinal))
+            || _preferredExtensions.Any(e => lower.EndsWith(e, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Extensions of things to install on Windows.
+    /// </summary>
+    private static readonly string[] InstallableOnWindows = [".exe", ".msi", ".msix", ".appx"];
+
+    /// <summary>
+    /// Extensions of things to install on macOS.
+    /// </summary>
+    private static readonly string[] InstallableOnMac = [".dmg", ".pkg"];
+
+    /// <summary>
+    /// Extensions of things to install on Linux.
+    /// </summary>
+    private static readonly string[] InstallableOnLinux = [".deb", ".rpm", ".appimage"];
 
     /// <summary>
     /// True for checksum, signature and similar sidecar files. Matches only known metadata extensions and
