@@ -7,7 +7,7 @@
 
     <PackageId>GitHubReleaseUpdater</PackageId>
     <Authors>coldhighsun</Authors>
-    <Description>Check, download and verify application updates published as GitHub Releases (github.com and GitHub Enterprise).</Description>
+    <Description>Check, download and verify application updates published as GitHub Releases (github.com and GitHub Enterprise), with an optional UI-agnostic update flow.</Description>
     <PackageTags>github;release;update;updater;auto-update;semver</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
