@@ -149,6 +149,29 @@ public sealed class JsonFileLastCheckStoreTests : IDisposable
     }
 
     /// <summary>
+    /// A lock that another program drops within a moment, as antivirus does, only delays the write.
+    /// </summary>
+    [Fact]
+    public async Task Write_to_a_briefly_locked_file_is_retried_and_succeeds()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetSkippedVersionAsync(SemanticVersion.Parse("3.0.0"), TestContext.Current.CancellationToken);
+        var checkedAt = new DateTimeOffset(2026, 2, 3, 4, 5, 6, TimeSpan.Zero);
+        var holder = new FileStream(StatePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var release = Task.Run(async () =>
+        {
+            await Task.Delay(150, TestContext.Current.CancellationToken);
+            holder.Dispose();
+        }, TestContext.Current.CancellationToken);
+
+        await store.SetLastCheckedAtAsync(checkedAt, TestContext.Current.CancellationToken);
+        await release;
+
+        Assert.Equal(checkedAt, await store.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(SemanticVersion.Parse("3.0.0"), await store.GetSkippedVersionAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
     /// Writes from several tasks leave a valid file and no temporary files.
     /// </summary>
     [Fact]
