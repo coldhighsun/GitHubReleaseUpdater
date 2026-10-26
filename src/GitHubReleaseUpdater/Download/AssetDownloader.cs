@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Buffers;
 using System.Net;
 using System.Security.Cryptography;
 using GitHubReleaseUpdater.Exceptions;
@@ -73,6 +74,13 @@ public sealed class AssetDownloader
     /// Minimum interval between progress callbacks.
     /// </summary>
     public TimeSpan ProgressInterval { get; init; } = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// Minimum interval between resume checkpoints (the first chunk is always checkpointed at once). Kept apart from
+    /// <see cref="ProgressInterval"/> because a checkpoint costs a flush and a small file write, which is far more than a
+    /// progress callback. Default 2 seconds.
+    /// </summary>
+    public TimeSpan CheckpointInterval { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Extra attempts made after a failed download before giving up, applied per <see cref="DownloadAsync"/> call.
@@ -491,6 +499,22 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
+    /// Records a last checkpoint after a failed transfer. Best-effort: whatever goes wrong here (the failure may itself
+    /// be a disk error) is ignored so that the original exception is the one that propagates.
+    /// </summary>
+    private static async Task TryFinalCheckpointAsync(FileStream target, string metaPath, GitHubAsset asset, long verifiedLength)
+    {
+        try
+        {
+            await TryCheckpointAsync(target, metaPath, asset, verifiedLength, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The checkpoint of an earlier chunk, if any, stays valid.
+        }
+    }
+
+    /// <summary>
     /// Identity used to detect a stale partial file: the download URL is unique per asset (and is required to be
     /// non-empty to download it at all — see <c>CreateAssetRequest</c>), unlike <see cref="GitHubAsset.Id"/> alone,
     /// which defaults to 0 for a <see cref="GitHubAsset"/> not populated from a real GitHub API response and would
@@ -512,7 +536,7 @@ public sealed class AssetDownloader
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         var start = Math.Max(0, length - TailHashWindow);
-        var buffer = new byte[length - start];
+        Span<byte> buffer = stackalloc byte[(int)(length - start)];
         stream.Position = start;
         stream.ReadExactly(buffer);
         return ComputeTailHash(buffer);
@@ -528,7 +552,7 @@ public sealed class AssetDownloader
     private static string ComputeTailHash(FileStream target, long length)
     {
         var start = Math.Max(0, length - TailHashWindow);
-        var buffer = new byte[length - start];
+        Span<byte> buffer = stackalloc byte[(int)(length - start)];
         target.Position = start;
         try
         {
@@ -542,10 +566,10 @@ public sealed class AssetDownloader
     }
 
     /// <summary>
-    /// Hex-encoded MD5 of <paramref name="bytes"/>. Used only to detect accidental corruption of a resumed
-    /// partial file, not as a security control.
+    /// Hex-encoded SHA-256 of <paramref name="bytes"/>. Used only to detect accidental corruption of a resumed
+    /// partial file, not as a security control. SHA-256 rather than MD5, which throws where FIPS mode is enforced.
     /// </summary>
-    private static string ComputeTailHash(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(MD5.HashData(bytes));
+    private static string ComputeTailHash(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     /// <summary>
     /// True for exceptions worth retrying: transport-level failures (<see cref="HttpRequestException"/> and
@@ -607,7 +631,7 @@ public sealed class AssetDownloader
     /// <summary>
     /// Copies <paramref name="source"/> to <paramref name="target"/> in <see cref="BufferSize"/> chunks, reporting
     /// progress and (when <paramref name="checkpoint"/> is supplied) recording a resume checkpoint at most every
-    /// <see cref="ProgressInterval"/> — except the very first chunk, which is always checkpointed immediately so a
+    /// <see cref="CheckpointInterval"/> — except the very first chunk, which is always checkpointed immediately so a
     /// failure right after it still leaves a verified, resumable partial instead of waiting out a full interval —
     /// and throwing if the final received byte count (starting from <paramref name="initialReceived"/>, non-zero
     /// when resuming a partial download) falls short of <paramref name="total"/>.
@@ -622,6 +646,7 @@ public sealed class AssetDownloader
         CancellationToken cancellationToken)
     {
         var buffer = new byte[BufferSize];
+        using var idleTimer = new IdleTimer(_idleTimeout, cancellationToken);
         long received = initialReceived;
         var stopwatch = Stopwatch.StartNew();
         var lastReport = TimeSpan.Zero;
@@ -629,29 +654,41 @@ public sealed class AssetDownloader
         var checkpointed = false;
 
         progress?.Report(new DownloadProgress(received, total, TimeSpan.Zero) { ResumedBytes = initialReceived });
-        int read;
-        while ((read = await ReadChunkAsync(source, buffer, cancellationToken).ConfigureAwait(false)) > 0)
+        var checkpointedBytes = initialReceived;
+        try
         {
-            await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-            received += read;
-
-            if (checkpoint is { } cp && (!checkpointed || stopwatch.Elapsed - lastCheckpoint >= ProgressInterval))
+            int read;
+            while ((read = await ReadChunkAsync(source, buffer, idleTimer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                checkpointed = true;
-                lastCheckpoint = stopwatch.Elapsed;
-                await TryCheckpointAsync(target, cp.MetaPath, cp.Asset, received, cancellationToken).ConfigureAwait(false);
+                await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                received += read;
+
+                if (checkpoint is { } cp && (!checkpointed || stopwatch.Elapsed - lastCheckpoint >= CheckpointInterval))
+                {
+                    checkpointed = true;
+                    lastCheckpoint = stopwatch.Elapsed;
+                    checkpointedBytes = received;
+                    await TryCheckpointAsync(target, cp.MetaPath, cp.Asset, received, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (stopwatch.Elapsed - lastReport >= ProgressInterval)
+                {
+                    lastReport = stopwatch.Elapsed;
+                    progress?.Report(new DownloadProgress(received, total, stopwatch.Elapsed) { ResumedBytes = initialReceived });
+                }
             }
 
-            if (stopwatch.Elapsed - lastReport >= ProgressInterval)
+            if (total is { } expected && received != expected)
             {
-                lastReport = stopwatch.Elapsed;
-                progress?.Report(new DownloadProgress(received, total, stopwatch.Elapsed) { ResumedBytes = initialReceived });
+                throw new UpdaterException($"Download truncated: expected {expected} bytes but received {received}.");
             }
         }
-
-        if (total is { } expected && received != expected)
+        catch (Exception) when (checkpoint is not null && received > checkpointedBytes && !cancellationToken.IsCancellationRequested)
         {
-            throw new UpdaterException($"Download truncated: expected {expected} bytes but received {received}.");
+            // The interval between checkpoints can leave seconds of received data past the last one, which a resume would
+            // throw away; record what did arrive before the failure goes on, so a retry continues from here.
+            await TryFinalCheckpointAsync(target, checkpoint.Value.MetaPath, checkpoint.Value.Asset, received).ConfigureAwait(false);
+            throw;
         }
 
         progress?.Report(new DownloadProgress(received, total ?? received, stopwatch.Elapsed) { ResumedBytes = initialReceived });
@@ -659,47 +696,128 @@ public sealed class AssetDownloader
 
     /// <summary>
     /// Reads the next chunk of <paramref name="source"/>, failing with <see cref="TimeoutException"/> when no data
-    /// arrives within <see cref="IdleTimeout"/>. Each read gets its own timer, so time spent writing or
+    /// arrives within <see cref="IdleTimeout"/>. The timer restarts for each read, so time spent writing or
     /// checkpointing between reads never counts towards it.
     /// </summary>
-    private async ValueTask<int> ReadChunkAsync(Stream source, Memory<byte> buffer, CancellationToken cancellationToken)
+    private static async ValueTask<int> ReadChunkAsync(Stream source, Memory<byte> buffer, IdleTimer idleTimer, CancellationToken cancellationToken)
     {
-        if (_idleTimeout is not { } timeout || timeout == Timeout.InfiniteTimeSpan)
+        if (idleTimer.Timeout is not { } timeout)
         {
             return await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
 
-        using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        idleCts.CancelAfter(timeout);
+        var token = idleTimer.Start();
         try
         {
-            return await source.ReadAsync(buffer, idleCts.Token).ConfigureAwait(false);
+            return await source.ReadAsync(buffer, token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && idleCts.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && idleTimer.IsExpired)
         {
             throw new TimeoutException($"No data received from the asset stream for {timeout}.", ex);
         }
     }
 
     /// <summary>
-    /// Fixed cross-platform set (not <see cref="Path.GetInvalidFileNameChars"/>, which varies by OS and
-    /// would leave e.g. ':' and '?' unsanitized when running on Linux CI).
+    /// One <see cref="CancellationTokenSource"/> reused for every read of a download, instead of a new one (and timer)
+    /// per chunk.
     /// </summary>
-    private static readonly char[] InvalidFileNameChars =
-        "\"<>|:*?/\\".ToCharArray()
-            .Concat(Enumerable.Range(0, 32).Select(i => (char)i))
-            .ToArray();
+    private sealed class IdleTimer : IDisposable
+    {
+        private readonly CancellationToken _caller;
+        private CancellationTokenSource? _cts;
+
+        public IdleTimer(TimeSpan? timeout, CancellationToken caller)
+        {
+            Timeout = timeout is { } t && t != System.Threading.Timeout.InfiniteTimeSpan ? t : null;
+            _caller = caller;
+        }
+
+        /// <summary>
+        /// The idle limit, or null when disabled.
+        /// </summary>
+        public TimeSpan? Timeout { get; }
+
+        /// <summary>
+        /// Whether the idle limit (not just the caller) cancelled the current read.
+        /// </summary>
+        public bool IsExpired => _cts?.IsCancellationRequested ?? false;
+
+        /// <summary>
+        /// Restarts the limit and returns the token to read with.
+        /// </summary>
+        public CancellationToken Start()
+        {
+            if (_cts is null || !_cts.TryReset())
+            {
+                _cts?.Dispose();
+                _cts = CancellationTokenSource.CreateLinkedTokenSource(_caller);
+            }
+
+            _cts.CancelAfter(Timeout!.Value);
+            return _cts.Token;
+        }
+
+        public void Dispose() => _cts?.Dispose();
+    }
 
     /// <summary>
-    /// Replaces invalid file-name characters with <c>_</c> and rejects names that are empty or refer to the current/parent directory.
+    /// Fixed cross-platform set (not <see cref="Path.GetInvalidFileNameChars"/>, which varies by OS and
+    /// would leave e.g. ':' and '?' unsanitized when running on Linux CI): the Windows-invalid printable characters
+    /// plus all control characters.
     /// </summary>
-    private static string SanitizeFileName(string name)
+    private static readonly SearchValues<char> InvalidFileNameChars =
+        SearchValues.Create("\"<>|:*?/\\" + string.Concat(Enumerable.Range(0, 32).Select(i => (char)i)));
+
+    /// <summary>
+    /// Device names Windows refuses as file names (with or without an extension).
+    /// </summary>
+    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        var cleaned = new string(name.Select(c => InvalidFileNameChars.Contains(c) ? '_' : c).ToArray()).Trim();
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    /// <summary>
+    /// Replaces invalid file-name characters with <c>_</c> and rejects names that are empty or refer to the
+    /// current/parent directory. On Windows it also drops trailing dots and spaces (which Windows silently strips, so
+    /// two names could end up as one file) and prefixes a reserved device name with <c>_</c>; other systems keep such
+    /// names as they are.
+    /// </summary>
+    internal static string SanitizeFileName(string name) => SanitizeFileName(name, OperatingSystem.IsWindows());
+
+    /// <summary>
+    /// Like <see cref="SanitizeFileName(string)"/>, for the given kind of file system.
+    /// </summary>
+    internal static string SanitizeFileName(string name, bool windows)
+    {
+        var cleaned = name;
+        if (name.AsSpan().IndexOfAny(InvalidFileNameChars) >= 0)
+        {
+            cleaned = string.Create(name.Length, name, static (span, source) =>
+            {
+                for (var i = 0; i < span.Length; i++)
+                {
+                    span[i] = InvalidFileNameChars.Contains(source[i]) ? '_' : source[i];
+                }
+            });
+        }
+
+        cleaned = windows ? cleaned.Trim().TrimEnd('.', ' ') : cleaned.Trim();
         if (cleaned.Length == 0 || cleaned is "." or "..")
         {
             throw new ArgumentException($"Invalid asset file name '{name}'.", nameof(name));
         }
+
+        if (windows)
+        {
+            var dot = cleaned.IndexOf('.');
+            if (ReservedNames.Contains(dot < 0 ? cleaned : cleaned[..dot]))
+            {
+                cleaned = "_" + cleaned;
+            }
+        }
+
         return cleaned;
     }
 

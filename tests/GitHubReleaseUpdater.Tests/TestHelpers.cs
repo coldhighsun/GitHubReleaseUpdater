@@ -230,8 +230,11 @@ internal sealed class FakeReleaseClient : IGitHubReleaseClient
         return Task.FromResult(new AssetStream(new MemoryStream(bytes), ReportLength ? bytes.Length : null, new MemoryStream()));
     }
 
+    /// <summary>When set, <see cref="ReadAssetTextAsync"/> throws this instead of returning the text.</summary>
+    public Exception? ThrowOnReadText { get; set; }
+
     public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
-        => Task.FromResult(Encoding.UTF8.GetString(AssetBytes[asset.Name]));
+        => ThrowOnReadText is not null ? throw ThrowOnReadText : Task.FromResult(Encoding.UTF8.GetString(AssetBytes[asset.Name]));
 }
 
 /// <summary>

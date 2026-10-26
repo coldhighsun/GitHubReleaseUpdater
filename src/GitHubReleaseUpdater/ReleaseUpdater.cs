@@ -277,23 +277,41 @@ public sealed class ReleaseUpdater : IDisposable
     /// <exception cref="AssetNotFoundException">No asset matched the selector.</exception>
     public Task<DownloadResult> DownloadAsync(UpdateCheckResult check, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
+        // Argument errors are thrown at once; the state errors (no update, no asset) come through the task.
         ArgumentNullException.ThrowIfNull(check);
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        return DownloadUpdateAsync(check, directory, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Downloads the asset selected in <paramref name="check"/>; see <see cref="DownloadAsync(UpdateCheckResult, string, IProgress{DownloadProgress}?, CancellationToken)"/>.
+    /// </summary>
+    private async Task<DownloadResult> DownloadUpdateAsync(UpdateCheckResult check, string directory, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+    {
         var update = check.Update ?? throw new InvalidOperationException("No update is available.");
         if (update.SelectedAsset is null)
             throw new AssetNotFoundException(
                 $"No asset in release {update.Release.TagName} matched the configured selector.",
                 update.Release.Assets.Select(a => a.Name).ToArray());
-        return DownloadAsync(update.Release, update.SelectedAsset, directory, progress, cancellationToken);
+        return await DownloadAssetAsync(update.Release, update.SelectedAsset, directory, progress, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Downloads and verifies an explicit asset of a release.
     /// </summary>
-    public async Task<DownloadResult> DownloadAsync(GitHubRelease release, GitHubAsset asset, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
+    public Task<DownloadResult> DownloadAsync(GitHubRelease release, GitHubAsset asset, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(release);
         ArgumentNullException.ThrowIfNull(asset);
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        return DownloadAssetAsync(release, asset, directory, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Downloads and verifies an asset of a release whose arguments have been validated.
+    /// </summary>
+    private async Task<DownloadResult> DownloadAssetAsync(GitHubRelease release, GitHubAsset asset, string directory, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+    {
 
         // Resolve the expected checksum first so a missing one (with RequireChecksum) fails before any bytes are transferred.
         var reported = await _checksums.GetExpectedSha256Async(release, asset, cancellationToken).ConfigureAwait(false);

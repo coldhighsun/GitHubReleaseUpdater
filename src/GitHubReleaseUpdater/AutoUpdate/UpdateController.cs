@@ -551,7 +551,8 @@ public sealed partial class UpdateController
         _download = null;
         if (_options.CleanDownloadDirectory)
         {
-            await DeleteOldDownloadsAsync(update.SelectedAsset!.Name, () => true).ConfigureAwait(true);
+            // The name the downloader will save it under, which differs from the asset's for a reserved or unusual one.
+            await DeleteOldDownloadsAsync(AssetDownloader.SanitizeFileName(update.SelectedAsset!.Name), () => true).ConfigureAwait(true);
         }
 
         var generation = Interlocked.Increment(ref _downloadGeneration);

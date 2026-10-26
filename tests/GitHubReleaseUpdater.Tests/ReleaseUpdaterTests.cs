@@ -624,4 +624,40 @@ public class ReleaseUpdaterTests : IDisposable
         public Task<string?> GetExpectedSha256Async(GitHubReleaseUpdater.GitHub.Models.GitHubRelease release, GitHubReleaseUpdater.GitHub.Models.GitHubAsset asset, CancellationToken cancellationToken = default)
             => Task.FromResult<string?>(value);
     }
+
+    /// <summary>
+    /// Both <c>DownloadAsync</c> overloads report an invalid call through the returned task, not by throwing before it.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_WithNoUpdate_FaultsTheTaskInsteadOfThrowingSynchronously()
+    {
+        var updater = new ReleaseUpdater(Options("1.0.0"), new FakeReleaseClient { Latest = TestData.Release("v1.0.0", "app-win-x64.zip") });
+        var check = await updater.CheckForUpdateAsync();
+
+        var task = updater.DownloadAsync(check, _dir);
+
+        Assert.True(task.IsFaulted);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => task);
+    }
+
+    [Fact]
+    public void DownloadAsync_WithNullCheck_ThrowsArgumentNullExceptionAtOnce()
+    {
+        var updater = new ReleaseUpdater(Options("1.0.0"), new FakeReleaseClient());
+
+        var thrown = Record.Exception(() => { _ = updater.DownloadAsync((UpdateCheckResult)null!, _dir); });
+
+        Assert.IsType<ArgumentNullException>(thrown);
+    }
+
+    [Fact]
+    public void DownloadAsync_WithEmptyDirectory_ThrowsArgumentExceptionAtOnce()
+    {
+        var updater = new ReleaseUpdater(Options("1.0.0"), new FakeReleaseClient());
+        var check = UpdateCheckResult.Failed(GitHubReleaseUpdater.Versioning.SemanticVersion.Parse("1.0.0"), new InvalidOperationException());
+
+        var thrown = Record.Exception(() => { _ = updater.DownloadAsync(check, " "); });
+
+        Assert.IsAssignableFrom<ArgumentException>(thrown);
+    }
 }

@@ -282,7 +282,7 @@ public class AssetDownloaderTests : IDisposable
         Directory.CreateDirectory(_dir);
         await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), stale);
         // Marks the leftover bytes as belonging to this exact asset and verified up to their full length.
-        var tailHash = Convert.ToHexStringLower(MD5.HashData(stale));
+        var tailHash = Convert.ToHexStringLower(SHA256.HashData(stale));
         await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{stale.Length}:{tailHash}");
 
         var client = new ResumableAssetClient { FullBytes = full, HonorRange = false };
@@ -303,7 +303,7 @@ public class AssetDownloaderTests : IDisposable
         var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
         Directory.CreateDirectory(_dir);
         await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), full);
-        var tailHash = Convert.ToHexStringLower(MD5.HashData(full));
+        var tailHash = Convert.ToHexStringLower(SHA256.HashData(full));
         await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{full.Length}:{tailHash}");
         var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full);
         using var client = TestData.Client(handler);
@@ -325,7 +325,7 @@ public class AssetDownloaderTests : IDisposable
         var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = 0, ApiUrl = "https://api.github.com/repos/o/r/releases/assets/1" };
         Directory.CreateDirectory(_dir);
         await File.WriteAllBytesAsync(Path.Combine(_dir, "a.bin.partial"), full);
-        var tailHash = Convert.ToHexStringLower(MD5.HashData(full));
+        var tailHash = Convert.ToHexStringLower(SHA256.HashData(full));
         await File.WriteAllTextAsync(Path.Combine(_dir, "a.bin.partial.meta"), $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{full.Length}:{tailHash}");
         var handler = new StubHttpHandler().OnRangeAwareBytes("/releases/assets/1", full);
         using var client = TestData.Client(handler);
@@ -541,7 +541,7 @@ public class AssetDownloaderTests : IDisposable
         var partialPath = Path.Combine(_dir, "a.bin.partial");
         var metaPath = partialPath + ".meta";
         await File.WriteAllBytesAsync(partialPath, partial);
-        var tailHash = Convert.ToHexStringLower(MD5.HashData(partial));
+        var tailHash = Convert.ToHexStringLower(SHA256.HashData(partial));
         await File.WriteAllTextAsync(metaPath, $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{partial.Length}:{tailHash}");
         // Without the cap the download would keep looping; succeeding after a few attempts turns that into a
         // failed assertion instead of a hung test.
@@ -578,7 +578,7 @@ public class AssetDownloaderTests : IDisposable
         var partialPath = Path.Combine(_dir, "a.bin.partial");
         var metaPath = partialPath + ".meta";
         await File.WriteAllBytesAsync(partialPath, partial);
-        var tailHash = Convert.ToHexStringLower(MD5.HashData(partial));
+        var tailHash = Convert.ToHexStringLower(SHA256.HashData(partial));
         await File.WriteAllTextAsync(metaPath, $"{asset.ApiUrl}:{asset.Id}:{asset.Size}\n{partial.Length}:{tailHash}");
         var client = new FlakyAssetClient { Bytes = [1], FailUntilAttempt = 1, ExceptionFactory = () => new OperationCanceledException() };
         var downloader = new AssetDownloader(client) { RetryDelay = TimeSpan.Zero };
@@ -889,5 +889,196 @@ public class AssetDownloaderTests : IDisposable
         public Task<IReadOnlyList<GitHubRelease>> ListReleasesAsync(string owner, string repo, int perPage = 30, int page = 1, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<GitHubRelease?> GetReleaseByTagAsync(string owner, string repo, string tag, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<string> ReadAssetTextAsync(GitHubAsset asset, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    [Theory]
+    [InlineData("a:b?.bin", "a_b_.bin")]
+    [InlineData("setup.exe. ", "setup.exe")]
+    [InlineData("CON", "_CON")]
+    [InlineData("nul.txt", "_nul.txt")]
+    [InlineData("Com1.tar.gz", "_Com1.tar.gz")]
+    [InlineData("console.exe", "console.exe")]
+    [InlineData("dir/evil\\name.bin", "dir_evil_name.bin")]
+    [InlineData("app-1.0.0.zip", "app-1.0.0.zip")]
+    public void SanitizeFileName_makes_names_safe_on_windows(string name, string expected)
+        => Assert.Equal(expected, AssetDownloader.SanitizeFileName(name, windows: true));
+
+    /// <summary>
+    /// Other systems keep names that are only special on Windows, but still replace the characters Windows refuses.
+    /// </summary>
+    [Theory]
+    [InlineData("aux.tar.gz", "aux.tar.gz")]
+    [InlineData("NUL", "NUL")]
+    [InlineData("app.", "app.")]
+    [InlineData("a:b?.bin", "a_b_.bin")]
+    public void SanitizeFileName_keeps_windows_only_special_names_elsewhere(string name, string expected)
+        => Assert.Equal(expected, AssetDownloader.SanitizeFileName(name, windows: false));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(".")]
+    [InlineData("..")]
+    public void SanitizeFileName_rejects_empty_and_dot_names(string name)
+    {
+        Assert.Throws<ArgumentException>(() => AssetDownloader.SanitizeFileName(name, windows: true));
+        Assert.Throws<ArgumentException>(() => AssetDownloader.SanitizeFileName(name, windows: false));
+    }
+
+    [Fact]
+    public void SanitizeFileName_rejects_a_name_of_only_dots_on_windows()
+        => Assert.Throws<ArgumentException>(() => AssetDownloader.SanitizeFileName("...", windows: true));
+
+    /// <summary>
+    /// Checkpoints are rate-limited by their own interval, not the progress interval, but a failed transfer still records
+    /// what arrived, so the retry does not throw away the data received since the last checkpoint.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_FailureRecordsFinalCheckpointBeyondTheInterval()
+    {
+        var full = new byte[64];
+        Random.Shared.NextBytes(full);
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 40 };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, ProgressInterval = TimeSpan.Zero, MaxRetryAttempts = 0 };
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.Equal(40, VerifiedLength());
+    }
+
+    [Fact]
+    public async Task DownloadAsync_DefaultCheckpointInterval_RetryResumesFromTheFailurePoint()
+    {
+        var full = new byte[64];
+        Random.Shared.NextBytes(full);
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 40 };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, RetryDelay = TimeSpan.Zero };
+
+        var path = await downloader.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal([0L, 40L], client.RequestedRangeStarts);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_ZeroCheckpointInterval_CheckpointsEveryChunk()
+    {
+        var full = new byte[64];
+        Random.Shared.NextBytes(full);
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 40 };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, CheckpointInterval = TimeSpan.Zero, MaxRetryAttempts = 0 };
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.Equal(40, VerifiedLength());
+    }
+
+    [Fact]
+    public async Task DownloadAsync_ZeroCheckpointInterval_ResumesFromLastCheckpoint()
+    {
+        var full = new byte[64];
+        Random.Shared.NextBytes(full);
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 40 };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, CheckpointInterval = TimeSpan.Zero, RetryDelay = TimeSpan.Zero };
+
+        var path = await downloader.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+        Assert.Equal([0L, 40L], client.RequestedRangeStarts);
+    }
+
+    /// <summary>
+    /// The idle timer is reused across reads: a stall long after many fast reads must still be detected, and many fast
+    /// reads must not trip it.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_StallAfterManyChunks_ThrowsTimeoutException()
+    {
+        var full = new byte[200];
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 100, StallInsteadOfFail = true };
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var downloader = new AssetDownloader(client) { BufferSize = 4, MaxRetryAttempts = 0, IdleTimeout = TimeSpan.FromMilliseconds(200) };
+
+        await Assert.ThrowsAsync<TimeoutException>(() => downloader.DownloadAsync(asset, _dir));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_ManyFastChunksWithIdleTimeout_Completes()
+    {
+        var full = new byte[4096];
+        Random.Shared.NextBytes(full);
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full };
+        var downloader = new AssetDownloader(client) { BufferSize = 16, IdleTimeout = TimeSpan.FromSeconds(5) };
+
+        var path = await downloader.DownloadAsync(asset, _dir);
+
+        Assert.Equal(full, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_AssetNameWithInvalidCharacter_IsSavedUnderASafeName()
+    {
+        var client = new FakeReleaseClient();
+        client.AssetBytes["setup:1.exe"] = [1, 2, 3];
+        var asset = TestData.Release("v1", 3, "setup:1.exe").Assets[0];
+
+        var path = await new AssetDownloader(client).DownloadAsync(asset, _dir);
+
+        Assert.Equal(Path.Combine(_dir, "setup_1.exe"), path);
+        Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(path));
+    }
+
+    /// <summary>
+    /// Reads how many bytes the sidecar of a.bin's partial file records as verified.
+    /// </summary>
+    private long VerifiedLength()
+    {
+        var meta = File.ReadAllText(Path.Combine(_dir, "a.bin.partial.meta"));
+        return long.Parse(meta.Split('\n')[1].Split(':')[0]);
+    }
+
+    /// <summary>
+    /// With resume switched off no sidecar is ever written, and a failed download leaves nothing behind.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_FailureWithoutResume_LeavesNoPartialOrSidecar()
+    {
+        var full = new byte[64];
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        var client = new ResumableAssetClient { FullBytes = full, FailAfterBytesOnAttempt = 1, FailAfterBytes = 40 };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, AllowResume = false, MaxRetryAttempts = 0 };
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => downloader.DownloadAsync(asset, _dir));
+
+        Assert.Empty(Directory.GetFiles(_dir));
+    }
+
+    /// <summary>
+    /// A download cancelled by the caller records no final checkpoint and removes the partial file and its sidecar.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAsync_CallerCancellationMidTransfer_LeavesNoPartialOrSidecar()
+    {
+        var full = new byte[64];
+        var asset = new GitHubAsset { Id = 1, Name = "a.bin", Size = full.Length, ApiUrl = "https://api.example/assets/1" };
+        using var cts = new CancellationTokenSource();
+        var client = new ResumableAssetClient
+        {
+            FullBytes = full,
+            FailAfterBytesOnAttempt = 1,
+            FailAfterBytes = 40,
+            StallInsteadOfFail = true,
+            BeforeFailure = () => cts.Cancel(),
+        };
+        var downloader = new AssetDownloader(client) { BufferSize = 8, IdleTimeout = TimeSpan.FromMinutes(1) };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloader.DownloadAsync(asset, _dir, cancellationToken: cts.Token));
+
+        Assert.Empty(Directory.GetFiles(_dir));
     }
 }
