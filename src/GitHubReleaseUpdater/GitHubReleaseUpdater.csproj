@@ -19,6 +19,10 @@
     <DebugType>embedded</DebugType>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <!-- Packing fails when the public API breaks compatibility with the last released version. After a release, raise the
+         baseline to it; an intended break needs a CompatibilitySuppressions.xml (dotnet pack -p:ApiCompatGenerateSuppressionFile=true). -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageValidationBaselineVersion>0.5.0</PackageValidationBaselineVersion>
   </PropertyGroup>
 
   <ItemGroup>
