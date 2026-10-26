@@ -871,6 +871,37 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// An installer that cannot be watched is reported and given ten times the grace period before it is taken to have ended.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test is done.
+    /// </returns>
+    [Fact]
+    public async Task Installer_that_cannot_be_watched_is_given_ten_times_the_grace_period()
+    {
+        _launcher.ProcessId = 42;
+        var controller = Create(
+            watchInstaller: true,
+            gracePeriod: TimeSpan.FromSeconds(1),
+            waitForExit: _ => Task.FromException(new UnauthorizedAccessException()));
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => _errors.Count > 0 && _time.PendingTimers == 1);
+        _time.Advance(TimeSpan.FromSeconds(1));
+
+        Assert.False(install.IsCompleted);
+        Assert.Equal(UpdateState.Installing, controller.State);
+
+        _time.Advance(TimeSpan.FromSeconds(9));
+        await install;
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.Contains(_errors, e => e is UnauthorizedAccessException);
+        Assert.Equal(1, _presenter.InstallerEndedCount);
+    }
+
+    /// <summary>
     /// Installing without a found version does nothing.
     /// </summary>
     [Fact]
@@ -1233,6 +1264,281 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// A round of the loop deletes leftovers once the application is up to date, also when the checks are switched off.
+    /// </summary>
+    [Fact]
+    public async Task Run_sweeps_leftovers_in_every_round_when_up_to_date()
+    {
+        PublishRelease("v1.0.0");
+        var controller = Create(isAutoCheckEnabled: () => false, cleanDirectory: true);
+        await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+        Assert.Equal(UpdateState.UpToDate, controller.State);
+        Directory.CreateDirectory(_directory);
+        var first = Path.Combine(_directory, "old-setup.exe");
+        var second = Path.Combine(_directory, "older-setup.exe");
+        await File.WriteAllBytesAsync(first, [1], TestContext.Current.CancellationToken);
+        using var cts = new CancellationTokenSource();
+        var loop = controller.RunAsync(cts.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => !File.Exists(first) && _time.PendingTimers == 1);
+        await File.WriteAllBytesAsync(second, [1], TestContext.Current.CancellationToken);
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => !File.Exists(second));
+
+        Assert.Equal(0, _presenter.Confirmations);
+        await cts.CancelAsync();
+        await loop;
+    }
+
+    /// <summary>
+    /// With asking turned off a manual check only reports what it found, and installing is left to the application.
+    /// </summary>
+    [Fact]
+    public async Task Manual_check_does_not_ask_to_install_when_asking_is_off()
+    {
+        var controller = Create(askAfterManualCheck: false);
+
+        await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Equal(0, _presenter.Confirmations);
+        Assert.Empty(_presenter.Announced);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Empty(_presenter.Announced);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Confirmations);
+        Assert.Single(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// A check that is throttled puts back the state it found, with the error that explains it.
+    /// </summary>
+    [Fact]
+    public async Task Throttled_check_keeps_the_last_error_of_the_state_it_restores()
+    {
+        var failure = new IOException("held by a scanner");
+        _launcher.Failure = failure;
+        var controller = Create(throttle: true, store: new PlainStore());
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.Same(failure, controller.LastError);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.Same(failure, controller.LastError);
+    }
+
+    /// <summary>
+    /// The last error is set with the state that follows a failure and cleared by the next change of state.
+    /// </summary>
+    [Fact]
+    public async Task Last_error_follows_a_failure_and_ends_with_the_next_state()
+    {
+        var failure = new IOException("held by a scanner");
+        _launcher.Failure = failure;
+        Exception? seen = null;
+        var controller = Create();
+        controller.Changed += (_, _) => seen ??= controller.LastError;
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        Assert.Null(controller.LastError);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Same(failure, controller.LastError);
+        Assert.Same(failure, seen);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Null(controller.LastError);
+    }
+
+    /// <summary>
+    /// A check that fails leaves its error in the last error, also when nobody is told.
+    /// </summary>
+    [Fact]
+    public async Task Last_error_holds_the_error_of_a_failed_automatic_check()
+    {
+        var error = new HttpRequestException("offline");
+        _client.ThrowOnFetch = error;
+        var controller = Create();
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Failed, controller.State);
+        Assert.Same(error, controller.LastError);
+        Assert.Empty(_presenter.Failures);
+    }
+
+    /// <summary>
+    /// The progress of a download is kept and announced as it arrives.
+    /// </summary>
+    [Fact]
+    public async Task Progress_is_kept_and_announced()
+    {
+        var controller = Create();
+        var announced = 0;
+        controller.ProgressChanged += (_, _) => Interlocked.Increment(ref announced);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        Assert.Null(controller.Progress);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        await WaitUntilAsync(() => controller.Progress is { BytesReceived: 10 });
+        Assert.True(Volatile.Read(ref announced) >= 1);
+    }
+
+    /// <summary>
+    /// With the option on, the rounds of the loop leave a known newer version alone.
+    /// </summary>
+    [Fact]
+    public async Task Run_does_not_ask_again_while_a_newer_version_is_known_when_asked_not_to()
+    {
+        var controller = Create(askAfterManualCheck: false, skipWhileUpdateKnown: true);
+        await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+        PublishRelease("v3.0.0");
+        using var cts = new CancellationTokenSource();
+        var loop = controller.RunAsync(cts.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        Assert.Equal(SemanticVersion.Parse("2.0.0"), controller.Available?.Version);
+        await cts.CancelAsync();
+        await loop;
+    }
+
+    /// <summary>
+    /// When the check interval is not shorter than the minimum interval only the first round is throttled by the updater.
+    /// </summary>
+    [Fact]
+    public async Task Run_is_not_throttled_by_a_minimum_interval_it_already_keeps()
+    {
+        var controller = Create(throttle: true, store: new AlwaysJustCheckedStore(_time));
+        using var cts = new CancellationTokenSource();
+        var loop = controller.RunAsync(cts.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+        var afterFirst = _presenter.Announced.Count;
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => _presenter.Announced.Count == 1);
+
+        Assert.Equal(0, afterFirst);
+        await cts.CancelAsync();
+        await loop;
+    }
+
+    /// <summary>
+    /// A first round that made no check does not make the next one skip the throttling after a restart.
+    /// </summary>
+    [Fact]
+    public async Task Run_treats_the_first_round_that_checks_as_the_first_one()
+    {
+        var enabled = false;
+        var controller = Create(throttle: true, store: new AlwaysJustCheckedStore(_time), isAutoCheckEnabled: () => enabled);
+        using var cts = new CancellationTokenSource();
+        var loop = controller.RunAsync(cts.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+        enabled = true;
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        Assert.Empty(_presenter.Announced);
+
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => _presenter.Announced.Count == 1);
+        await cts.CancelAsync();
+        await loop;
+    }
+
+    /// <summary>
+    /// A second run of the loop on the same controller is throttled in its first round like the first run was.
+    /// </summary>
+    [Fact]
+    public async Task A_second_run_is_throttled_in_its_first_round()
+    {
+        var controller = Create(throttle: true, store: new AlwaysJustCheckedStore(_time));
+        using var first = new CancellationTokenSource();
+        var firstLoop = controller.RunAsync(first.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+        await first.CancelAsync();
+        await firstLoop;
+
+        using var second = new CancellationTokenSource();
+        var secondLoop = controller.RunAsync(second.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        Assert.Empty(_presenter.Announced);
+
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => _presenter.Announced.Count == 1);
+        await second.CancelAsync();
+        await secondLoop;
+    }
+
+    /// <summary>
+    /// A progress report of an earlier download that arrives after the next one started is ignored.
+    /// </summary>
+    [Fact]
+    public async Task Late_progress_of_an_earlier_download_is_ignored()
+    {
+        var controller = Create(launchInstaller: false);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        var earlier = controller.DownloadGeneration;
+        File.Delete(controller.DownloadedFile!);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.NotEqual(earlier, controller.DownloadGeneration);
+        var before = controller.Progress;
+
+        controller.ApplyProgress(earlier, controller.Available!, new DownloadProgress(999, 1000, TimeSpan.FromSeconds(1)));
+
+        Assert.Equal(before, controller.Progress);
+        controller.ApplyProgress(controller.DownloadGeneration, controller.Available!, new DownloadProgress(999, 1000, TimeSpan.FromSeconds(1)));
+        Assert.Equal(999, controller.Progress?.BytesReceived);
+    }
+
+    /// <summary>
+    /// A round whose check already cleaned the directory does not sweep again; one without a check does.
+    /// </summary>
+    [Fact]
+    public async Task Run_sweeps_only_in_rounds_whose_check_did_not_clean()
+    {
+        PublishRelease("v1.0.0");
+        var enabled = true;
+        var controller = Create(cleanDirectory: true, isAutoCheckEnabled: () => enabled);
+        using var cts = new CancellationTokenSource();
+        var loop = controller.RunAsync(cts.Token);
+        await WaitUntilAsync(() => _time.PendingTimers == 1);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await WaitUntilAsync(() => controller.State == UpdateState.UpToDate && _time.PendingTimers == 1);
+        Assert.Equal(0, controller.Sweeps);
+
+        enabled = false;
+        _time.Advance(TimeSpan.FromHours(24));
+        await WaitUntilAsync(() => controller.Sweeps == 1);
+        await cts.CancelAsync();
+        await loop;
+    }
+
+    /// <summary>
     /// The loop skips the rounds in which automatic checks are off.
     /// </summary>
     [Fact]
@@ -1366,7 +1672,9 @@ public sealed class UpdateControllerTests : IDisposable
         Func<int, Task>? waitForExit = null,
         TimeSpan? gracePeriod = null,
         TimeSpan? beforeInstallTimeout = null,
-        bool launchInstaller = true)
+        bool launchInstaller = true,
+        bool askAfterManualCheck = true,
+        bool skipWhileUpdateKnown = false)
     {
         return new UpdateController(
             new ReleaseUpdater(Options(throttle, store ?? _store, checksums ?? NoChecksumProvider.Instance, downloadRetries), _client),
@@ -1385,6 +1693,8 @@ public sealed class UpdateControllerTests : IDisposable
                 BeforeInstallTimeout = beforeInstallTimeout ?? TimeSpan.FromSeconds(10),
                 CleanDownloadDirectory = cleanDirectory,
                 LaunchInstaller = launchInstaller,
+                AskToInstallAfterManualCheck = askAfterManualCheck,
+                SkipChecksWhileUpdateKnown = skipWhileUpdateKnown,
                 WaitForProcessExitAsync = waitForExit is null ? (_, _) => Task.CompletedTask : (id, token) => waitForExit(id).WaitAsync(token),
             });
     }
@@ -1612,6 +1922,61 @@ public sealed class UpdateControllerTests : IDisposable
             Launched.Add((installerPath, options));
             return new InstallerLaunchResult(installerPath, ProcessId);
         }
+    }
+
+    /// <summary>
+    /// A store that remembers the time of the last check and nothing else, so that it cannot lift the throttling.
+    /// </summary>
+    private sealed class PlainStore : ILastCheckStore
+    {
+        /// <summary>
+        /// The time of the last check.
+        /// </summary>
+        private DateTimeOffset? _last;
+
+        /// <inheritdoc />
+        public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default) => Task.FromResult(_last);
+
+        /// <inheritdoc />
+        public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<SemanticVersion?>(null);
+
+        /// <inheritdoc />
+        public Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default)
+        {
+            _last = checkedAt;
+            return Task.CompletedTask;
+        }
+
+        /// <inheritdoc />
+        public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <inheritdoc />
+        public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A store that always says the last check was just made, so that every throttled check is refused.
+    /// </summary>
+    /// <param name="time">The clock.</param>
+    private sealed class AlwaysJustCheckedStore(TimeProvider time) : ILastCheckStore
+    {
+        /// <inheritdoc />
+        public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<DateTimeOffset?>(time.GetUtcNow());
+
+        /// <inheritdoc />
+        public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<SemanticVersion?>(null);
+
+        /// <inheritdoc />
+        public Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <inheritdoc />
+        public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <inheritdoc />
+        public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     /// <summary>

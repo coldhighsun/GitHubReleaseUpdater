@@ -106,4 +106,21 @@ public sealed class UpdateControllerOptions
     /// the user unpacks. <see cref="UpdateController.DownloadedFile"/> then names the file. Defaults to true.
     /// </summary>
     public bool LaunchInstaller { get; init; } = true;
+
+    /// <summary>
+    /// When true (the default), a manual check that finds a version goes on to ask the presenter whether to install it
+    /// right away (<see cref="IUpdatePresenter.ConfirmInstallAsync"/>). When false, a manual check only finds out: the
+    /// presenter hears of "nothing newer" and of failures as usual but not of a found version, which the application reads
+    /// from <see cref="UpdateController.Available"/> when <see cref="UpdateController.Changed"/> is raised, and installs by
+    /// calling <see cref="UpdateController.InstallAsync"/> or <see cref="UpdateController.DownloadAsync"/> when the user
+    /// decides.
+    /// </summary>
+    public bool AskToInstallAfterManualCheck { get; init; } = true;
+
+    /// <summary>
+    /// When true, the rounds of <see cref="UpdateController.RunAsync"/> make no check while a newer version is already
+    /// known (<see cref="UpdateController.Available"/> is set): nothing changes until it is installed or skipped, and
+    /// asking again only costs a request. Defaults to false.
+    /// </summary>
+    public bool SkipChecksWhileUpdateKnown { get; init; }
 }
