@@ -243,4 +243,33 @@ public class AssetSelectorTests
         Assert.Contains(RuntimeInfo.Current.Os, new[] { "win", "osx", "linux", "freebsd", "unknown" });
         Assert.False(string.IsNullOrEmpty(RuntimeInfo.Current.Arch));
     }
+
+    /// <summary>
+    /// With AllowUnknownPlatform, a platform-less file is chosen only if it is installable on the target OS.
+    /// </summary>
+    [Theory]
+    [InlineData("osx", "arm64", "MyApp.dmg", "MyApp.exe")]
+    [InlineData("linux", "x64", "MyApp.deb", "MyApp.dmg")]
+    [InlineData("win", "x64", "MyApp.MSI", "MyApp.deb")]
+    public void Platformless_installer_is_chosen_by_the_extension_of_the_target_os(string os, string arch, string expected, string other)
+    {
+        var release = TestData.Release("v1", other, expected, "notes.txt");
+        var selector = new RuntimeAssetSelector(new RuntimeInfo(os, arch)) { AllowUnknownPlatform = true };
+
+        var selected = selector.Select(release);
+
+        Assert.Equal(expected, selected?.Name);
+    }
+
+    /// <summary>
+    /// On an OS with no installable extensions of its own, only preferred extensions qualify a platform-less file.
+    /// </summary>
+    [Fact]
+    public void Platformless_file_on_an_unknown_os_needs_a_preferred_extension()
+    {
+        var release = TestData.Release("v1", "MyApp.exe", "MyApp.TAR.GZ");
+        var selector = new RuntimeAssetSelector(new RuntimeInfo("freebsd", "x64"), ".tar.gz") { AllowUnknownPlatform = true };
+
+        Assert.Equal("MyApp.TAR.GZ", selector.Select(release)?.Name);
+    }
 }

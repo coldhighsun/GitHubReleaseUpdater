@@ -36,14 +36,15 @@ public interface IUpdatePresenter
     }
 
     /// <summary>
-    /// Asks whether to download and install a version now.
+    /// Asks whether to download and install a version now. The default answers no, so a presenter that does not ask
+    /// the user never installs anything on its own.
     /// </summary>
     /// <param name="update">The release to install.</param>
     /// <param name="currentVersion">The running version.</param>
     /// <returns>True if the user agrees.</returns>
     ValueTask<bool> ConfirmInstallAsync(AvailableUpdate update, SemanticVersion currentVersion)
     {
-        return ValueTask.FromResult(true);
+        return ValueTask.FromResult(false);
     }
 
     /// <summary>

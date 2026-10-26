@@ -206,6 +206,12 @@ internal sealed class FakeReleaseClient : IGitHubReleaseClient
     /// <summary>When set, <see cref="GetLatestReleaseAsync"/> and <see cref="ListReleasesAsync"/> throw this instead of returning.</summary>
     public Exception? ThrowOnFetch { get; set; }
 
+    /// <summary>When set, <see cref="OpenAssetStreamAsync"/> throws this instead of returning the asset.</summary>
+    public Exception? ThrowOnOpen { get; set; }
+
+    /// <summary>Number of calls made to <see cref="OpenAssetStreamAsync"/> so far.</summary>
+    public int OpenCalls { get; private set; }
+
     public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, CancellationToken cancellationToken = default)
         => ThrowOnFetch is not null ? throw ThrowOnFetch : Task.FromResult(Latest);
 
@@ -217,6 +223,9 @@ internal sealed class FakeReleaseClient : IGitHubReleaseClient
 
     public Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, CancellationToken cancellationToken = default)
     {
+        OpenCalls++;
+        if (ThrowOnOpen is not null)
+            throw ThrowOnOpen;
         var bytes = AssetBytes[asset.Name];
         return Task.FromResult(new AssetStream(new MemoryStream(bytes), ReportLength ? bytes.Length : null, new MemoryStream()));
     }

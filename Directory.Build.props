@@ -9,7 +9,6 @@
     <AnalysisLevel>latest</AnalysisLevel>
 	<UseArtifactsOutput>true</UseArtifactsOutput>
     <MinVerTagPrefix>v</MinVerTagPrefix>
-    <DebugType>embedded</DebugType>
   </PropertyGroup>
 
   <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">

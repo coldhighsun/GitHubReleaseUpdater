@@ -16,6 +16,7 @@
     <PackageProjectUrl>https://github.com/coldhighsun/GitHubReleaseUpdater</PackageProjectUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
   </PropertyGroup>

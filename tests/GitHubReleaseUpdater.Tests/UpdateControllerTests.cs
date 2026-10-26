@@ -479,6 +479,214 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// An operation cancelled by something other than the caller's token, such as a timeout, is a failed installation.
+    /// </summary>
+    [Fact]
+    public async Task Timeout_during_the_installation_is_reported_as_a_failure()
+    {
+        var controller = Create(downloadRetries: 0);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        _client.ThrowOnOpen = new TaskCanceledException("timed out");
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Single(_presenter.InstallFailures);
+        Assert.Equal(1, _client.OpenCalls);
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
+    /// A version the user was asked about in a manual check is not announced again by an automatic one.
+    /// </summary>
+    [Fact]
+    public async Task Version_asked_about_in_a_manual_check_is_not_announced_afterwards()
+    {
+        _presenter.Agree = false;
+        var controller = Create();
+        await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Confirmations);
+        Assert.Empty(_presenter.Announced);
+    }
+
+    /// <summary>
+    /// A manual check queued behind an automatic one that is then cancelled goes with it.
+    /// </summary>
+    [Fact]
+    public async Task Queued_manual_check_is_dropped_when_the_automatic_one_is_cancelled()
+    {
+        var controller = Create();
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var calls = RequestManualChecksDuringFirstCheck(controller, 1, onRequested: () => _client.ThrowOnFetch = new OperationCanceledException(cts.Token));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => controller.CheckAsync(manual: false, cts.Token));
+
+        Assert.Equal(0, _presenter.Confirmations);
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateState.Idle, controller.State);
+        Assert.All(calls, call => Assert.True(call.IsCompletedSuccessfully));
+    }
+
+    /// <summary>
+    /// Several manual checks requested during one automatic check are made as one.
+    /// </summary>
+    [Fact]
+    public async Task Several_manual_checks_requested_during_an_automatic_one_are_made_as_one()
+    {
+        var controller = Create();
+        var calls = RequestManualChecksDuringFirstCheck(controller, 2);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Confirmations);
+        Assert.All(calls, call => Assert.True(call.IsCompletedSuccessfully));
+    }
+
+    /// <summary>
+    /// The queued check runs under the token of the call that was running, not the tokens of the callers that asked.
+    /// </summary>
+    [Fact]
+    public async Task Queued_manual_check_ignores_the_tokens_of_its_callers()
+    {
+        var controller = Create();
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var calls = RequestManualChecksDuringFirstCheck(controller, 1, cts.Token);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Confirmations);
+        Assert.All(calls, call => Assert.True(call.IsCompletedSuccessfully));
+    }
+
+    /// <summary>
+    /// A skip that is being written does not undo a newer version found meanwhile.
+    /// </summary>
+    [Fact]
+    public async Task Skip_being_written_does_not_undo_a_version_found_meanwhile()
+    {
+        var store = new GatedSkipStore();
+        var controller = Create(store: store);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        var skipping = controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+        PublishRelease("v3.0.0");
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        store.Gate.SetResult();
+
+        Assert.True(await skipping);
+        Assert.Equal(SemanticVersion.Parse("3.0.0"), controller.Available?.Version);
+        Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
+    /// Skipping while the user is being asked to install does nothing.
+    /// </summary>
+    [Fact]
+    public async Task Skipping_while_the_user_is_being_asked_does_nothing()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        var gate = new TaskCompletionSource<bool>();
+        _presenter.ConfirmGate = gate.Task;
+        var installing = controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        var skipped = await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+        gate.SetResult(false);
+        await installing;
+
+        Assert.False(skipped);
+        Assert.Null(await _store.GetSkippedVersionAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
+    /// A wait longer than the clock can measure is refused when the controller is created.
+    /// </summary>
+    [Theory]
+    [InlineData(60, 1)]
+    [InlineData(0, 60)]
+    public void Delays_the_clock_cannot_measure_are_refused(int initialDelayDays, int checkIntervalDays)
+    {
+        var updater = new ReleaseUpdater(Options(throttle: false, _store, NoChecksumProvider.Instance), _client);
+        var options = new UpdateControllerOptions
+        {
+            InitialDelay = TimeSpan.FromDays(initialDelayDays),
+            CheckInterval = TimeSpan.FromDays(checkIntervalDays),
+        };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new UpdateController(updater, _presenter, options));
+    }
+
+    /// <summary>
+    /// Skipping records the version, forgets it and keeps automatic checks quiet about it.
+    /// </summary>
+    [Fact]
+    public async Task Skipped_version_is_recorded_forgotten_and_not_announced_again()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var skipped = await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.True(skipped);
+        Assert.Equal(SemanticVersion.Parse("2.0.0"), await _store.GetSkippedVersionAsync(TestContext.Current.CancellationToken));
+        Assert.Null(controller.Available);
+        Assert.Equal(UpdateState.UpToDate, controller.State);
+        Assert.Single(_presenter.Announced);
+    }
+
+    /// <summary>
+    /// Skipping with nothing found does nothing.
+    /// </summary>
+    [Fact]
+    public async Task Skipping_with_nothing_found_does_nothing()
+    {
+        var controller = Create();
+
+        Assert.False(await controller.SkipVersionAsync(TestContext.Current.CancellationToken));
+        Assert.Null(await _store.GetSkippedVersionAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A store that fails to record the skip is reported and the version stays available.
+    /// </summary>
+    [Fact]
+    public async Task Failure_to_record_a_skip_is_reported_and_the_version_stays()
+    {
+        var controller = Create(store: new SkipFailingStore());
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var skipped = await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(skipped);
+        Assert.IsType<IOException>(Assert.Single(_errors));
+        Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
+    /// A presenter that leaves the confirmation to its defaults never installs anything.
+    /// </summary>
+    [Fact]
+    public async Task Presenter_with_default_confirmation_installs_nothing()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(Options(throttle: false, _store, NoChecksumProvider.Instance), _client),
+            new SilentPresenter(),
+            new UpdateControllerOptions { DownloadDirectory = _directory });
+
+        await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
     /// A cancelled check restores the previous state and throws.
     /// </summary>
     [Fact]
@@ -636,6 +844,7 @@ public sealed class UpdateControllerTests : IDisposable
     /// the fake release has no checksum.</param>
     /// <param name="checksums">The checksum provider; none by default.</param>
     /// <param name="store">The last-check store; the in-memory one by default.</param>
+    /// <param name="downloadRetries">Extra attempts the updater makes after a failed download.</param>
     /// <returns>The controller.</returns>
     private UpdateController Create(
         bool throttle = false,
@@ -643,10 +852,11 @@ public sealed class UpdateControllerTests : IDisposable
         Func<bool>? isAutoCheckEnabled = null,
         bool requireVerified = false,
         IChecksumProvider? checksums = null,
-        ILastCheckStore? store = null)
+        ILastCheckStore? store = null,
+        int downloadRetries = 2)
     {
         return new UpdateController(
-            new ReleaseUpdater(Options(throttle, store ?? _store, checksums ?? NoChecksumProvider.Instance), _client),
+            new ReleaseUpdater(Options(throttle, store ?? _store, checksums ?? NoChecksumProvider.Instance, downloadRetries), _client),
             _presenter,
             new UpdateControllerOptions
             {
@@ -660,13 +870,45 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// Makes the controller receive manual checks as soon as it starts its first check, as a user clicking "Check now"
+    /// while a background check runs would.
+    /// </summary>
+    /// <param name="controller">The controller to watch.</param>
+    /// <param name="count">How many manual checks to request.</param>
+    /// <param name="token">The cancellation token every request is made with.</param>
+    /// <param name="onRequested">Runs right after the requests were made; may be null.</param>
+    /// <returns>The tasks of the requests, which the test can inspect once the first check has been made.</returns>
+    private static List<Task> RequestManualChecksDuringFirstCheck(UpdateController controller, int count, CancellationToken token = default, Action? onRequested = null)
+    {
+        var calls = new List<Task>();
+        var requested = false;
+        controller.Changed += (_, _) =>
+        {
+            if (controller.State != UpdateState.Checking || requested)
+            {
+                return;
+            }
+
+            requested = true;
+            for (var i = 0; i < count; i++)
+            {
+                calls.Add(controller.CheckAsync(manual: true, token));
+            }
+
+            onRequested?.Invoke();
+        };
+        return calls;
+    }
+
+    /// <summary>
     /// Builds the updater options used by the tests.
     /// </summary>
     /// <param name="throttle">Whether to throttle checks to once in 24 hours.</param>
     /// <param name="store">The last-check store.</param>
     /// <param name="checksums">The checksum provider.</param>
+    /// <param name="downloadRetries">Extra attempts after a failed download.</param>
     /// <returns>The options.</returns>
-    private UpdaterOptions Options(bool throttle, ILastCheckStore store, IChecksumProvider checksums) => new()
+    private UpdaterOptions Options(bool throttle, ILastCheckStore store, IChecksumProvider checksums, int downloadRetries = 2) => new()
     {
         Owner = "o",
         Repo = "r",
@@ -677,6 +919,7 @@ public sealed class UpdateControllerTests : IDisposable
         LastCheckStore = store,
         MinimumCheckInterval = throttle ? TimeSpan.FromHours(24) : null,
         TimeProvider = _time,
+        DownloadMaxRetryAttempts = downloadRetries,
     };
 
     /// <summary>
@@ -865,6 +1108,60 @@ public sealed class UpdateControllerTests : IDisposable
 
         /// <inheritdoc />
         public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A last-check store whose recording of a skipped version waits for the test to open <see cref="Gate"/>.
+    /// </summary>
+    private sealed class GatedSkipStore : ILastCheckStore
+    {
+        /// <summary>
+        /// Gets the gate <see cref="SetSkippedVersionAsync"/> waits on.
+        /// </summary>
+        public TaskCompletionSource Gate { get; } = new();
+
+        /// <inheritdoc />
+        public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default) => Task.FromResult<DateTimeOffset?>(null);
+
+        /// <inheritdoc />
+        public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.FromResult<SemanticVersion?>(null);
+
+        /// <inheritdoc />
+        public Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <inheritdoc />
+        public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default) => Gate.Task;
+
+        /// <inheritdoc />
+        public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A last-check store that records nothing and fails to record a skipped version.
+    /// </summary>
+    private sealed class SkipFailingStore : ILastCheckStore
+    {
+        /// <inheritdoc />
+        public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default) => Task.FromResult<DateTimeOffset?>(null);
+
+        /// <inheritdoc />
+        public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.FromResult<SemanticVersion?>(null);
+
+        /// <inheritdoc />
+        public Task SetLastCheckedAtAsync(DateTimeOffset checkedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <inheritdoc />
+        public Task SetSkippedVersionAsync(SemanticVersion version, CancellationToken cancellationToken = default) => throw new IOException("read-only");
+
+        /// <inheritdoc />
+        public Task ClearSkippedVersionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A presenter that implements nothing, so every member keeps its default.
+    /// </summary>
+    private sealed class SilentPresenter : IUpdatePresenter
+    {
     }
 
     /// <summary>
