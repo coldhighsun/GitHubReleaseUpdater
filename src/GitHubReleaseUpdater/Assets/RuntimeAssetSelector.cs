@@ -122,6 +122,9 @@ public sealed class RuntimeAssetSelector : IAssetSelector
         if (!osHit && tokens.Any(t => otherOs.Contains(t, StringComparer.OrdinalIgnoreCase))) return 0;
         if (!archHit && tokens.Any(t => otherArch.Contains(t, StringComparer.OrdinalIgnoreCase))) return 0;
 
+        // A name that only gives the architecture must still not be an installer of another OS (e.g. App-x64.msi on Linux).
+        if (!osHit && IsInstallerOfOtherOs(name)) return 0;
+
         var score = 0;
         if (osHit) score += 100;
         if (archHit) score += 50;
@@ -155,6 +158,38 @@ public sealed class RuntimeAssetSelector : IAssetSelector
     }
 
     /// <summary>
+    /// Whether the file name has an extension that is an installer of an OS other than the target (and not one the
+    /// caller asked for).
+    /// </summary>
+    /// <param name="name">The asset file name.</param>
+    /// <returns>True if the file can only be an installer for another OS.</returns>
+    private bool IsInstallerOfOtherOs(string name)
+    {
+        return !EndsWithAny(name, _installableExtensions) && EndsWithAny(name, AllInstallableExtensions);
+    }
+
+    /// <summary>
+    /// Extensions of things to install on any of the known OSes.
+    /// </summary>
+    private static readonly string[] AllInstallableExtensions = [.. InstallableOnWindows, .. InstallableOnMac, .. InstallableOnLinux];
+
+    /// <summary>
+    /// Whether <paramref name="name"/> ends with one of <paramref name="extensions"/>, ignoring case.
+    /// </summary>
+    private static bool EndsWithAny(string name, string[] extensions)
+    {
+        foreach (var extension in extensions)
+        {
+            if (name.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Whether a platform-less file name has an extension that is something to install on the target OS or one the caller
     /// asked for.
     /// </summary>
@@ -162,7 +197,7 @@ public sealed class RuntimeAssetSelector : IAssetSelector
     /// <returns>True if the file may be chosen as a platform-less installer.</returns>
     private bool LooksInstallable(string name)
     {
-        return _installableExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+        return EndsWithAny(name, _installableExtensions);
     }
 
     /// <summary>

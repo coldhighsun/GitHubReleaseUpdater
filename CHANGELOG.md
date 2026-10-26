@@ -17,6 +17,8 @@ they are listed under **Changed**). Releases are tagged `vX.Y.Z`; the notes of e
 - `UpdateControllerOptions.SkipChecksWhileUpdateKnown` (default `false`): no background check while a newer version is known.
 - `UpdateController.LastError`, `UpdateController.Progress` and `UpdateController.ProgressChanged`.
 - Package API compatibility validation against the last release when packing, and a Windows job in CI.
+- `AssetDownloader.CheckpointInterval` (default 2 seconds): how often a resumable download records its checkpoint,
+  apart from `ProgressInterval`.
 
 ### Changed
 
@@ -27,6 +29,26 @@ they are listed under **Changed**). Releases are tagged `vX.Y.Z`; the notes of e
   round of `RunAsync` is throttled by the updater. Before, a check interval equal to the minimum interval skipped every
   other round, because the last check is recorded when it ends.
 - `UpdateController` is split into partial files (no change of behavior).
+- Resume checkpoints use SHA-256 instead of MD5 (MD5 throws where FIPS mode is enforced); partial files left by an
+  earlier version are simply downloaded again. Checkpoints are written at most every `CheckpointInterval` instead of
+  every `ProgressInterval`.
+- File names of assets are made safer on Windows only: reserved device names (`CON`, `NUL`, ...) get a `_` prefix and
+  trailing dots and spaces are dropped. Other systems keep such names.
+- `ReleaseUpdater.DownloadAsync(UpdateCheckResult, ...)` reports "no update" and "no asset" through the returned task
+  instead of throwing before returning it. Invalid arguments (a null or empty argument) of both `DownloadAsync` overloads
+  are thrown at once, where the overload taking a release and an asset used to report them through the returned task.
+
+### Fixed
+
+- `RuntimeAssetSelector` no longer picks an installer of another OS that names only the architecture (for example
+  `App-x64.msi` on Linux).
+- `ReleaseChecksumProvider` falls back to the digest GitHub reports when a checksum file cannot be read, instead of failing
+  the download; without such a digest the failure still stops the download, so it is never left unverified by accident.
+  Checksum files larger than 16 MiB are not loaded (that also fails the download when there is no digest). All checksum
+  files are tried before that, so one unusable file does not hide the hash in another.
+- A failed download records what had arrived as a last resume checkpoint, so a retry does not repeat the data received since
+  the previous one.
+- `UpdateController` with `CleanDownloadDirectory` keeps the files of the package under the name the downloader saves it as.
 
 ### Fixed
 

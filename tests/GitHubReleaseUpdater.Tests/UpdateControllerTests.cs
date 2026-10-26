@@ -2212,4 +2212,47 @@ public sealed class UpdateControllerTests : IDisposable
 
         Assert.Equal(expected, UpdateController.IsInstallerProcess(launchedAt.AddSeconds(secondsAfterLaunch), launchedAt));
     }
+
+    /// <summary>
+    /// Cleaning the download directory before a download keeps the files of the package under the name the downloader saves
+    /// it as, which differs from the asset's own for a reserved Windows name.
+    /// </summary>
+    [Fact]
+    public async Task Download_keeps_files_of_the_package_saved_under_a_sanitized_name()
+    {
+        _client.Latest = TestData.Release("v2.0.0", "setup:1.exe");
+        _client.AssetBytes["setup:1.exe"] = new byte[10];
+        Directory.CreateDirectory(_directory);
+        var saved = AssetDownloader.SanitizeFileName("setup:1.exe");
+        var kept = Path.Combine(_directory, saved + ".partial.note");
+        var stray = Path.Combine(_directory, "old-setup.exe");
+        await File.WriteAllBytesAsync(kept, [1], TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(stray, [1], TestContext.Current.CancellationToken);
+        var options = new UpdaterOptions
+        {
+            Owner = "o",
+            Repo = "r",
+            CurrentVersion = "1.0.0",
+            AssetSelector = new DelegateAssetSelector(a => a.Name == "setup:1.exe"),
+            ChecksumProvider = NoChecksumProvider.Instance,
+            InstallerLauncher = _launcher,
+            LastCheckStore = _store,
+            TimeProvider = _time,
+        };
+        var controller = new UpdateController(new ReleaseUpdater(options, _client), _presenter, new UpdateControllerOptions
+        {
+            DownloadDirectory = _directory,
+            CleanDownloadDirectory = true,
+            OnError = _errors.Add,
+            TimeProvider = _time,
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.True(File.Exists(kept));
+        Assert.False(File.Exists(stray));
+        Assert.Equal(Path.Combine(_directory, saved), controller.DownloadedFile);
+    }
 }

@@ -272,4 +272,50 @@ public class AssetSelectorTests
 
         Assert.Equal("MyApp.TAR.GZ", selector.Select(release)?.Name);
     }
+
+    /// <summary>
+    /// A name that gives only the architecture must not be an installer of another OS: App-x64.msi is for Windows even
+    /// though nothing in its name says so.
+    /// </summary>
+    [Theory]
+    [InlineData("linux", "x64", "App-x64.msi")]
+    [InlineData("osx", "x64", "App-x64.exe")]
+    [InlineData("win", "x64", "App-x64.dmg")]
+    [InlineData("win", "x64", "App-x64.deb")]
+    public void Runtime_selector_skips_arch_only_installer_of_another_os(string os, string arch, string name)
+    {
+        var release = TestData.Release("v1", name);
+
+        Assert.Null(new RuntimeAssetSelector(new RuntimeInfo(os, arch)).Select(release));
+    }
+
+    [Theory]
+    [InlineData("win", "x64", "App-x64.msi")]
+    [InlineData("linux", "x64", "App-x64.deb")]
+    [InlineData("osx", "arm64", "App-arm64.dmg")]
+    [InlineData("linux", "x64", "App-x64.zip")]
+    public void Runtime_selector_keeps_arch_only_asset_that_suits_the_os(string os, string arch, string name)
+    {
+        var release = TestData.Release("v1", name);
+
+        Assert.Equal(name, new RuntimeAssetSelector(new RuntimeInfo(os, arch)).Select(release)?.Name);
+    }
+
+    [Fact]
+    public void Runtime_selector_keeps_arch_only_installer_of_another_os_when_it_is_a_preferred_extension()
+    {
+        var release = TestData.Release("v1", "App-x64.msi");
+
+        var selected = new RuntimeAssetSelector(new RuntimeInfo("linux", "x64"), ".msi").Select(release);
+
+        Assert.Equal("App-x64.msi", selected?.Name);
+    }
+
+    [Fact]
+    public void Runtime_selector_skips_installer_of_another_os_that_names_only_the_arch_even_among_other_assets()
+    {
+        var release = TestData.Release("v1", "App-x64.msi", "App-x64.deb");
+
+        Assert.Equal("App-x64.deb", new RuntimeAssetSelector(new RuntimeInfo("linux", "x64")).Select(release)?.Name);
+    }
 }
