@@ -61,16 +61,18 @@ if (check.IsUpdateAvailable)
 | Type | Purpose |
 |---|---|
 | `ReleaseUpdater` | Facade: `CheckForUpdateAsync()`, `ListAssets()`, `DownloadAsync()`, `LaunchInstallerAsync()` and `DownloadAndLaunchInstallerAsync()`. Constructing a new instance per check is fine — see [HttpClient reuse](#httpclient-reuse) below. |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout`, `InstallerLauncher` are optional. |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` are required; `Token`, `BaseUrl`, `IncludePrerelease`, `TagPrefix`, `AssetSelector`, `ChecksumProvider`, `RequireChecksum`, `HttpClient`, `Timeout`, `LastCheckStore`, `MinimumCheckInterval`, `DownloadMaxRetryAttempts`, `DownloadRetryDelay`, `DownloadAllowResume`, `DownloadIdleTimeout`, `InstallerLauncher`, `TimeProvider` are optional. |
 | `UpdateCheckResult` | Outcome of `CheckForUpdateAsync()`. `Success`/`Error` report whether the check completed without an exception (see [Exceptions](#exceptions) below). `LatestVersion`/`Release` report the highest release found even when it isn't an update; `Update` (see below) is the null-safe way to get an actionable one. `Throttled` is true when a `LastCheckStore` skipped the API call (see below). |
 | `AvailableUpdate` | `UpdateCheckResult.Update`: non-null exactly when `IsUpdateAvailable`, with **non-nullable** `Version`/`Release` (`SelectedAsset` is still nullable — null when no asset matched the selector). |
 | `SemanticVersion` | Minimal SemVer 2.0 implementation. Tolerates a `v` prefix, a missing patch (`1.2`) and a custom prefix (`TagPrefix`). |
 | `IAssetSelector` | Chooses which release asset to download:<br>`RuntimeAssetSelector` (default — matches the current OS/arch: `win/linux/osx × x64/x86/arm64`, including aliases such as `amd64`, `aarch64`, `darwin`, `x86_64`)<br>`PatternAssetSelector` (wildcards plus `{os}` `{arch}` `{rid}` `{version}` `{tagversion}` `{tag}` placeholders; `{version}` is normalized — tag `v1.2` gives `1.2.0` — while `{tagversion}` keeps the tag's text minus prefix/`v`, giving `1.2`)<br>`DelegateAssetSelector` (custom predicate) |
 | `IChecksumProvider` | Supplies the expected SHA‑256:<br>`ReleaseChecksumProvider` (default — looks for a `<asset>.sha256` sidecar → a `SHA256SUMS` / `*checksums.txt` aggregate file → the GitHub API `digest` field)<br>`StaticChecksumProvider` (caller-supplied)<br>`NoChecksumProvider` (disables verification)<br>A custom provider may return hex in any case, optionally prefixed with `sha256:`; any other value fails the download with `UpdaterException` before any bytes are transferred. |
 | `IGitHubReleaseClient` | GitHub API abstraction; `GitHubReleaseClient` is the `HttpClient` implementation. Inject your own for tests or custom transports. |
-| `ILastCheckStore` | Optional persistence hook (see below) for throttling and skipped-version tracking. `InMemoryLastCheckStore` is a process-lifetime implementation; production apps implement it over their own settings storage. |
+| `ILastCheckStore` | Optional persistence hook (see below) for throttling and skipped-version tracking. `InMemoryLastCheckStore` is a process-lifetime implementation; `JsonFileLastCheckStore(path)` keeps the state in a small JSON file so it survives restarts (or implement it over your own settings storage). |
 
 ### Version resolution
+
+The current version usually comes from the running application: `SemanticVersion.TryFromAssembly(typeof(App).Assembly, out var current)` reads the assembly's `AssemblyInformationalVersion` (where MinVer and similar tools put the full SemVer, pre-release and build metadata included) and returns `false` — rather than a made-up `0.0.0` — when there is none. `version.ToString(includeMetadata: false)` formats it without the `+commit` part for display.
 
 - `IncludePrerelease = false` (default): calls `/releases/latest`; GitHub already excludes pre-releases and drafts.
 - `IncludePrerelease = true`: fetches the most recent `ReleaseScanCount` releases (default 30) and takes the highest SemVer. Drafts and unparseable tags are skipped; the latter are reported in `UpdateCheckResult.SkippedTags`.
@@ -97,7 +99,9 @@ if (check.Throttled)
 }
 ```
 
-- `MinimumCheckInterval` throttles: a call inside the window returns `UpdateCheckResult.Throttled == true` without contacting GitHub.
+- `MinimumCheckInterval` throttles: a call inside the window returns `UpdateCheckResult.Throttled == true` without contacting GitHub. `UpdaterOptions.TimeProvider` supplies the clock (default `TimeProvider.System`), so tests can control it.
+- Failing to record the check time (`SetLastCheckedAtAsync` throws) does not discard a successful check; the next call is just not throttled, and the exception is available as `UpdateCheckResult.LastCheckStoreError` so you can log it.
+- `JsonFileLastCheckStore` is a ready-made persistent store: `LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`. Writes are atomic, and a missing or corrupt file counts as "nothing recorded".
 - `myStore.SetSkippedVersionAsync(version)` suppresses `IsUpdateAvailable`/`Update` for that version on future checks (it still shows up in `LatestVersion`, so you can still display "a newer version exists but was skipped"). Call `myStore.ClearSkippedVersionAsync()` to undo it.
 - For a user-initiated "check now" that should still surface a version the user previously skipped, call `CheckForUpdateAsync(bypassSkippedVersion: true)`. Throttling and recording the check time still happen as usual — only the skipped-version filter is bypassed for that call.
 - For a user-initiated "check now" that should ignore `MinimumCheckInterval` too, call `CheckForUpdateAsync(bypassThrottle: true)`. This lets you reuse the same `ReleaseUpdater`/`UpdaterOptions` for both throttled automatic checks and an unthrottled manual check, instead of constructing a second updater just to disable throttling.
@@ -105,6 +109,23 @@ if (check.Throttled)
 > **Breaking change:** `CheckForUpdateAsync` now takes `bypassSkippedVersion` and `bypassThrottle` before `cancellationToken`. A positional call like `CheckForUpdateAsync(cts.Token)` no longer compiles — pass it as `CheckForUpdateAsync(cancellationToken: cts.Token)` instead.
 >
 > **Breaking change:** `ILastCheckStore.SetSkippedVersionAsync` now takes a non-nullable `SemanticVersion`. A custom `ILastCheckStore` implementation must implement `ClearSkippedVersionAsync` directly instead of relying on the old `SetSkippedVersionAsync(null)` default; callers that passed `null` to clear the skipped version must call `ClearSkippedVersionAsync()` instead.
+
+### Automatic update flow (`GitHubReleaseUpdater.AutoUpdate`)
+
+The separate `GitHubReleaseUpdater.AutoUpdate` package adds `UpdateController`, a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default.
+
+```csharp
+var controller = new UpdateController(updater, new MyPresenter(), new UpdateControllerOptions
+{
+    IsAutoCheckEnabled = () => settings.CheckForUpdates,
+    InstallerLaunchOptions = InstallerLaunchOptions.InnoSetupSilent,
+});
+_ = controller.RunAsync(shutdownToken);       // background loop
+await controller.CheckAsync(manual: true);    // "Check for updates" button: bypasses throttling and skipped version
+await controller.InstallAsync();              // "Update to x.y.z"
+```
+
+`State` (`Idle`/`Checking`/`UpToDate`/`Available`/`Failed`/`Installing`) and `Available` describe the current situation; `Changed` fires on every change. A check or installation already running makes further calls do nothing. Call it from one thread (normally the UI thread). See the package's own README for details.
 
 ### HttpClient reuse
 
@@ -156,6 +177,10 @@ When a download is interrupted — whether it's about to be retried, or the proc
 - Throws `UpdaterException` if the server reported a Content-Length that does not match the bytes received.
 - When an expected hash can be resolved the file is verified before it is moved into place; on mismatch the download is discarded (any existing file at the destination is left untouched) and `ChecksumMismatchException` is thrown, its `FilePath` naming the discarded `.partial`. When no hash is available `DownloadResult.Verified` is `false` (set `RequireChecksum = true` to fail instead — it fails before any bytes are transferred).
 - Private repository assets are downloaded via the API endpoint with `Accept: application/octet-stream`; just supply a token.
+
+### Releases with a single, platform-less installer
+
+`RuntimeAssetSelector` never guesses: a file such as `MyApp-Setup-1.2.3.exe` that names neither an OS nor an architecture is not selected, so `SelectedAsset` is null. For a release that publishes one installer for one platform, either opt in with `new RuntimeAssetSelector { AllowUnknownPlatform = true }` (platform-less assets then rank below any asset that matches the runtime, and only files that look installable on the target OS — `.exe`/`.msi`/`.msix`/`.appx`, `.dmg`/`.pkg`, `.deb`/`.rpm`/`.appimage` — or have a preferred extension are eligible, so release notes or symbol archives are never picked; assets naming another OS or architecture and checksum/signature files are still never chosen), or use `new PatternAssetSelector("*Setup*.exe")`.
 
 ### Letting the user pick a platform
 
@@ -248,7 +273,7 @@ src/GitHubReleaseUpdater/      library (NuGet package)
   Assets/                      asset selectors
   Download/                    downloader and progress
   Verification/                checksum handling
-  LastCheck/                   ILastCheckStore and InMemoryLastCheckStore
+  LastCheck/                   ILastCheckStore, InMemoryLastCheckStore and JsonFileLastCheckStore
   Installation/                installer launching
   Exceptions/                  exception types
 samples/GitHubReleaseUpdater.Cli/   sample command-line tool
@@ -308,16 +333,18 @@ if (check.IsUpdateAvailable)
 | 类型 | 作用 |
 |---|---|
 | `ReleaseUpdater` | 门面。`CheckForUpdateAsync()`、`ListAssets()`、`DownloadAsync()`、`LaunchInstallerAsync()` 与 `DownloadAndLaunchInstallerAsync()`。每次检查都新建一个实例也没问题——见下方 [HttpClient 复用](#httpclient-复用)。 |
-| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout`、`InstallerLauncher` 可选。 |
+| `UpdaterOptions` | `Owner`/`Repo`/`CurrentVersion` 必填；`Token`、`BaseUrl`、`IncludePrerelease`、`TagPrefix`、`AssetSelector`、`ChecksumProvider`、`RequireChecksum`、`HttpClient`、`Timeout`、`LastCheckStore`、`MinimumCheckInterval`、`DownloadMaxRetryAttempts`、`DownloadRetryDelay`、`DownloadAllowResume`、`DownloadIdleTimeout`、`InstallerLauncher`、`TimeProvider` 可选。 |
 | `UpdateCheckResult` | `CheckForUpdateAsync()` 的结果。`Success`/`Error` 表示本次检查是否在未抛出异常的情况下完成（见下方[异常](#异常)）。`LatestVersion`/`Release` 反映找到的最高版本，即使它不构成更新也会有值；`Update`（见下）是判空安全的、用来获取"可执行更新"的方式。`Throttled` 表示本次因 `LastCheckStore` 节流而跳过了 API 调用（见下）。 |
 | `AvailableUpdate` | `UpdateCheckResult.Update`：当且仅当 `IsUpdateAvailable` 时非空，`Version`/`Release` **保证非空**（`SelectedAsset` 仍可能为空——没有资产匹配选择器时）。 |
 | `SemanticVersion` | 精简 SemVer 2.0 实现，容忍 `v` 前缀、`1.2` 缺省 patch、自定义前缀（`TagPrefix`）。 |
 | `IAssetSelector` | 从 Release 资产中选择要下载的文件：<br>`RuntimeAssetSelector`（默认，按当前 OS/架构自动匹配 `win/linux/osx × x64/x86/arm64` 及常见别名 `amd64`、`aarch64`、`darwin`、`x86_64`…）<br>`PatternAssetSelector`（通配符 + 占位符 `{os}` `{arch}` `{rid}` `{version}` `{tagversion}` `{tag}`；`{version}` 是规范化后的版本，tag `v1.2` 得到 `1.2.0`，`{tagversion}` 保留 tag 原文、只去掉前缀和 `v`，得到 `1.2`）<br>`DelegateAssetSelector`（自定义谓词） |
 | `IChecksumProvider` | 提供期望的 SHA‑256：<br>`ReleaseChecksumProvider`（默认，依次查找 `<asset>.sha256` 侧车文件 → `SHA256SUMS` / `*checksums.txt` 聚合文件 → GitHub API 的 `digest` 字段）<br>`StaticChecksumProvider`（调用方指定）<br>`NoChecksumProvider`（关闭校验）<br>自定义 provider 返回的值可以是任意大小写的十六进制，可带 `sha256:` 前缀；其他格式会在传输任何字节之前以 `UpdaterException` 失败。 |
 | `IGitHubReleaseClient` | GitHub API 抽象，`GitHubReleaseClient` 为 `HttpClient` 实现；可注入用于测试或自定义传输。 |
-| `ILastCheckStore` | 可选的持久化接口（见下），用于节流和"跳过某版本"。`InMemoryLastCheckStore` 是进程生命周期内的实现；生产环境应基于自己的设置存储来实现它。 |
+| `ILastCheckStore` | 可选的持久化接口（见下），用于节流和"跳过某版本"。`InMemoryLastCheckStore` 是进程生命周期内的实现；`JsonFileLastCheckStore(path)` 把状态存成一个小 JSON 文件，重启后依然有效（也可以基于自己的设置存储来实现）。 |
 
 ### 版本判定规则
+
+当前版本通常取自正在运行的应用：`SemanticVersion.TryFromAssembly(typeof(App).Assembly, out var current)` 读取程序集的 `AssemblyInformationalVersion`（MinVer 等工具会把完整的 SemVer，含预发布和构建元数据，写在这里）；没有该属性时返回 `false`，而不是编造一个 `0.0.0`。`version.ToString(includeMetadata: false)` 可得到不带 `+提交号` 的显示文本。
 
 - `IncludePrerelease = false`（默认）：调用 `/releases/latest`，GitHub 已排除 prerelease 与 draft。
 - `IncludePrerelease = true`：拉取最近 `ReleaseScanCount`（默认 30）条 release，按 SemVer 排序取最高（跳过 draft 与无法解析的 tag，后者记录在 `UpdateCheckResult.SkippedTags`）。
@@ -344,7 +371,9 @@ if (check.Throttled)
 }
 ```
 
-- `MinimumCheckInterval` 用于节流：在时间窗口内的调用会直接返回 `UpdateCheckResult.Throttled == true`，不会请求 GitHub。
+- `MinimumCheckInterval` 用于节流：在时间窗口内的调用会直接返回 `UpdateCheckResult.Throttled == true`，不会请求 GitHub。`UpdaterOptions.TimeProvider` 提供时钟（默认 `TimeProvider.System`），方便测试控制时间。
+- 记录检查时间失败（`SetLastCheckedAtAsync` 抛异常）不会丢弃已成功的检查结果，只是下一次调用不会被节流；异常可从 `UpdateCheckResult.LastCheckStoreError` 取得，方便记录日志。
+- `JsonFileLastCheckStore` 是现成的持久化实现：`LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`。写入是原子的，文件缺失或损坏时按"没有记录"处理。
 - 调用 `myStore.SetSkippedVersionAsync(version)` 可以让该版本在之后的检查中不再触发 `IsUpdateAvailable`/`Update`（但仍会出现在 `LatestVersion` 里，所以你依然可以提示"有新版本但已被跳过"）。调用 `myStore.ClearSkippedVersionAsync()` 可以撤销这个跳过。
 - 如果是用户主动点击的"立即检查"，希望仍然能看到之前被跳过的版本，可以调用 `CheckForUpdateAsync(bypassSkippedVersion: true)`：节流判断和检查时间的记录照常进行，只是这一次跳过版本过滤不生效。
 - 如果用户主动点击的"立即检查"还希望绕过 `MinimumCheckInterval` 节流，可以调用 `CheckForUpdateAsync(bypassThrottle: true)`。这样自动检查（要节流）和手动检查（不要节流）可以共用同一个 `ReleaseUpdater`/`UpdaterOptions` 实例，不必为了关闭节流单独再构造一个 updater。
@@ -352,6 +381,23 @@ if (check.Throttled)
 > **破坏性变更：** `CheckForUpdateAsync` 现在把 `bypassSkippedVersion` 和 `bypassThrottle` 放在 `cancellationToken` 之前。原来按位置传参的 `CheckForUpdateAsync(cts.Token)` 将无法编译，需要改成 `CheckForUpdateAsync(cancellationToken: cts.Token)`。
 >
 > **破坏性变更：** `ILastCheckStore.SetSkippedVersionAsync` 现在接受非空的 `SemanticVersion`。自定义 `ILastCheckStore` 实现需要直接实现 `ClearSkippedVersionAsync`，不能再依赖旧的 `SetSkippedVersionAsync(null)` 默认实现；原本通过传 `null` 来清除跳过版本的调用方需要改为调用 `ClearSkippedVersionAsync()`。
+
+### 自动更新流程（`GitHubReleaseUpdater.AutoUpdate`）
+
+独立的 `GitHubReleaseUpdater.AutoUpdate` 包提供 `UpdateController`：一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现。
+
+```csharp
+var controller = new UpdateController(updater, new MyPresenter(), new UpdateControllerOptions
+{
+    IsAutoCheckEnabled = () => settings.CheckForUpdates,
+    InstallerLaunchOptions = InstallerLaunchOptions.InnoSetupSilent,
+});
+_ = controller.RunAsync(shutdownToken);       // 后台循环
+await controller.CheckAsync(manual: true);    // “检查更新”按钮：绕过节流和已跳过的版本
+await controller.InstallAsync();              // “更新到 x.y.z”
+```
+
+`State`（`Idle`/`Checking`/`UpToDate`/`Available`/`Failed`/`Installing`）和 `Available` 描述当前情况，每次变化都会触发 `Changed`。已有检查或安装在运行时，再次调用什么都不做。请在同一线程（通常是 UI 线程）调用。详见该包自己的 README。
 
 ### HttpClient 复用
 
@@ -403,6 +449,10 @@ using var updater = new ReleaseUpdater(new UpdaterOptions
 - 服务器报告了 Content-Length 但字节数不符时抛 `UpdaterException`。
 - 能解析到期望哈希时进行校验，校验在文件移动到目标位置之前进行，不匹配则丢弃本次下载（目标位置已有的文件保持不变）并抛 `ChecksumMismatchException`，其 `FilePath` 为被丢弃的 `.partial` 路径；无法解析到哈希时 `DownloadResult.Verified = false`（设置 `RequireChecksum = true` 可改为直接失败，且在传输前就会失败）。
 - 私有仓库资产通过 API 端点 + `Accept: application/octet-stream` 下载，只要提供 Token 即可。
+
+### 只发布一个不带平台名的安装程序
+
+`RuntimeAssetSelector` 从不"猜"：像 `MyApp-Setup-1.2.3.exe` 这种既不含系统也不含架构的文件名不会被选中，`SelectedAsset` 为 null。如果某个 Release 只为一个平台发布一个安装程序，可以用 `new RuntimeAssetSelector { AllowUnknownPlatform = true }` 主动开启回退（不带平台名的资产排在任何匹配当前运行环境的资产之后，而且只有在目标系统上看起来可安装的文件——`.exe`/`.msi`/`.msix`/`.appx`、`.dmg`/`.pkg`、`.deb`/`.rpm`/`.appimage`——或带有首选扩展名的文件才会被考虑，发布说明、符号包不会被选中；点名了其他系统或架构的资产、校验和/签名文件仍然不会被选中），或者用 `new PatternAssetSelector("*Setup*.exe")`。
 
 ### 让用户选择平台
 
@@ -495,7 +545,7 @@ src/GitHubReleaseUpdater/      类库（NuGet 包）
   Assets/                      资产选择器
   Download/                    下载器与进度
   Verification/                校验
-  LastCheck/                   ILastCheckStore 与 InMemoryLastCheckStore
+  LastCheck/                   ILastCheckStore、InMemoryLastCheckStore 与 JsonFileLastCheckStore
   Installation/                启动安装程序
   Exceptions/                  异常
 samples/GitHubReleaseUpdater.Cli/   示例命令行
