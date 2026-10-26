@@ -159,6 +159,181 @@ public class InstallerLauncherTests : IDisposable
     }
 
     [Fact]
+    public async Task LaunchInstallerAsync_VerifierRefuses_ThrowsWithoutLaunching()
+    {
+        var launcher = new RecordingInstallerLauncher();
+        using var refusing = new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                ChecksumProvider = NoChecksumProvider.Instance,
+                InstallerLauncher = launcher,
+                InstallerVerifier = new StubVerifier(InstallerVerificationResult.Invalid("bad signature")),
+            },
+            new FakeReleaseClient());
+        var path = CreateInstaller();
+        var download = new DownloadResult(path, TestData.Release("v2.0.0", "setup.exe").Assets[0], Hash(path), verified: true);
+
+        var ex = await Assert.ThrowsAsync<InstallerVerificationException>(() => refusing.LaunchInstallerAsync(download));
+
+        Assert.Equal("bad signature", ex.Reason);
+        Assert.Equal(path, ex.FilePath);
+        Assert.Empty(launcher.Launched);
+    }
+
+    [Fact]
+    public async Task LaunchInstallerAsync_VerifierAccepts_Launches()
+    {
+        var launcher = new RecordingInstallerLauncher();
+        using var updater = new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                ChecksumProvider = NoChecksumProvider.Instance,
+                InstallerLauncher = launcher,
+                InstallerVerifier = new StubVerifier(InstallerVerificationResult.Valid("Contoso Ltd")),
+            },
+            new FakeReleaseClient());
+        var path = CreateInstaller();
+        var download = new DownloadResult(path, TestData.Release("v2.0.0", "setup.exe").Assets[0], Hash(path), verified: true);
+
+        await updater.LaunchInstallerAsync(download);
+
+        Assert.Single(launcher.Launched);
+    }
+
+    [Fact]
+    public async Task LaunchInstallerAsync_ChecksumMismatch_DoesNotAskTheVerifier()
+    {
+        var verifier = new StubVerifier(InstallerVerificationResult.Valid());
+        using var updater = new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                ChecksumProvider = NoChecksumProvider.Instance,
+                InstallerLauncher = new RecordingInstallerLauncher(),
+                InstallerVerifier = verifier,
+            },
+            new FakeReleaseClient());
+        var path = CreateInstaller();
+        var download = new DownloadResult(path, TestData.Release("v2.0.0", "setup.exe").Assets[0], Hash(path), verified: true);
+        await File.AppendAllTextAsync(path, "tampered");
+
+        await Assert.ThrowsAsync<ChecksumMismatchException>(() => updater.LaunchInstallerAsync(download));
+
+        Assert.Equal(0, verifier.Calls);
+    }
+
+    /// <summary>
+    /// A verifier that always gives the same verdict and counts its calls.
+    /// </summary>
+    /// <param name="result">The verdict.</param>
+    private sealed class StubVerifier(InstallerVerificationResult result) : IInstallerVerifier
+    {
+        /// <summary>
+        /// Gets how many times the verifier was asked.
+        /// </summary>
+        public int Calls { get; private set; }
+
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(result);
+        }
+    }
+
+    [Fact]
+    public async Task LaunchInstallerAsync_KeepsWritersOutOfTheFileUntilTheInstallerHasStarted()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows enforces the share mode against other opens.");
+        var path = CreateInstaller();
+        var launcher = new WriteProbingLauncher();
+        using var updater = new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                ChecksumProvider = NoChecksumProvider.Instance,
+                InstallerLauncher = launcher,
+            },
+            new FakeReleaseClient());
+        var download = new DownloadResult(path, TestData.Release("v2.0.0", "setup.exe").Assets[0], Hash(path), verified: true);
+
+        await updater.LaunchInstallerAsync(download);
+
+        Assert.IsType<IOException>(launcher.WriteAttempt);
+        await File.WriteAllBytesAsync(path, [9], TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task LaunchInstallerAsync_RealLauncherStartsAFileThatIsHeldOpen()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Starts a Windows program.");
+        var source = Path.Combine(Environment.SystemDirectory, "choice.exe");
+        Assert.SkipUnless(File.Exists(source), "No choice.exe found.");
+        var path = Path.Combine(_dir, "setup.exe");
+        File.Copy(source, path);
+        using var updater = new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                ChecksumProvider = NoChecksumProvider.Instance,
+            },
+            new FakeReleaseClient());
+        var download = new DownloadResult(path, TestData.Release("v2.0.0", "setup.exe").Assets[0], Hash(path), verified: true);
+
+        var result = await updater.LaunchInstallerAsync(download, new InstallerLaunchOptions { Arguments = "/T 1 /D Y /C YN" });
+
+        Assert.NotNull(result.ProcessId);
+        try
+        {
+            // choice.exe waits a second, so the process is still there; it is awaited so that its file can be deleted.
+            using var process = Process.GetProcessById(result.ProcessId!.Value);
+            await process.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        }
+        catch (ArgumentException)
+        {
+            // It has ended already, which is as good.
+        }
+    }
+
+    /// <summary>
+    /// A launcher that tries to open the installer for writing while it is being started, as a swap would.
+    /// </summary>
+    private sealed class WriteProbingLauncher : IInstallerLauncher
+    {
+        /// <summary>
+        /// Gets the exception of the attempt to write, or null if it succeeded.
+        /// </summary>
+        public Exception? WriteAttempt { get; private set; }
+
+        /// <inheritdoc />
+        public InstallerLaunchResult Launch(string installerPath, InstallerLaunchOptions options)
+        {
+            try
+            {
+                using var stream = new FileStream(installerPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+            }
+            catch (Exception ex)
+            {
+                WriteAttempt = ex;
+            }
+
+            return new InstallerLaunchResult(installerPath, null);
+        }
+    }
+
+    [Fact]
     public async Task LaunchInstallerAsync_FileModifiedAfterDownload_ThrowsChecksumMismatchWithoutLaunching()
     {
         var launcher = new RecordingInstallerLauncher();

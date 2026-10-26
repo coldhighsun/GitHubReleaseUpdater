@@ -1,5 +1,6 @@
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
+using GitHubReleaseUpdater.GitHub.Models;
 using GitHubReleaseUpdater.Installation;
 using GitHubReleaseUpdater.LastCheck;
 using GitHubReleaseUpdater.Versioning;
@@ -100,6 +101,20 @@ public sealed partial class UpdateController
     private ProgressBox? _progress;
 
     /// <summary>
+    /// The asset whose installer the verifier refused, with the refusal. Such an installer is refused again whenever it is
+    /// downloaded, so it is not downloaded again; a manual check forgets it, and so does another asset being offered.
+    /// </summary>
+    private Refusal? _refused;
+
+    /// <summary>
+    /// An installer the verifier refused.
+    /// </summary>
+    /// <param name="Asset">The asset it came from.</param>
+    /// <param name="Error">The refusal.</param>
+    /// <param name="Stage">Whether it was refused right after the download or when it was about to be started.</param>
+    private sealed record Refusal(GitHubAsset Asset, InstallerVerificationException Error, UpdateFailureStage Stage);
+
+    /// <summary>
     /// Counts the downloads, so that a late progress report of an earlier one is ignored.
     /// </summary>
     private int _downloadGeneration;
@@ -183,11 +198,43 @@ public sealed partial class UpdateController
     public AvailableUpdate? Available { get; private set; }
 
     /// <summary>
-    /// Gets why the last check, download or installation failed, or null. It is set together with the state change that
-    /// follows the failure, so a <see cref="Changed"/> handler sees it, and cleared by the next change of state. A manual
-    /// check that only finds a release without a package is not a failure and leaves it null.
+    /// Gets why and where the last check, download or installation failed, or null. It is set together with the state
+    /// change that follows the failure, so a <see cref="Changed"/> handler sees it, and cleared by the next change of
+    /// state. A manual check that only finds a release without a package is not a failure and leaves it null.
     /// </summary>
-    public Exception? LastError { get; private set; }
+    public UpdateFailure? LastFailure { get; private set; }
+
+    /// <summary>
+    /// Gets the exception of <see cref="LastFailure"/>, or null.
+    /// </summary>
+    public Exception? LastError => LastFailure?.Error;
+
+    /// <summary>
+    /// Gets a value indicating whether a check, a download or an installation is running or being asked about, so that
+    /// another one would be refused.
+    /// </summary>
+    public bool IsBusy => _installing || State is UpdateState.Checking or UpdateState.Downloading or UpdateState.Installing;
+
+    /// <summary>
+    /// Gets a value indicating whether <see cref="DownloadAsync"/> would download the package now: a newer version with
+    /// a package is known, its installer was not refused, it is not downloaded yet and nothing else is running.
+    /// </summary>
+    public bool CanDownload => HasInstaller && State == UpdateState.Available && !IsBusy && !IsInstallerRefused;
+
+    /// <summary>
+    /// Gets a value indicating whether the installer of the newer version was refused by the verifier, so that installing it
+    /// again would fail the same way. A manual check allows another try.
+    /// </summary>
+    public bool IsInstallerRefused => Available is { } update && RefusalOf(update) is not null;
+
+    /// <summary>
+    /// Gets a value indicating whether <see cref="InstallAsync"/> would do something now: a newer version with a package
+    /// is known, its installer was not refused and nothing else is running, and either the package still has to be downloaded or it is downloaded and
+    /// <see cref="UpdateControllerOptions.LaunchInstaller"/> allows starting it. Whether the downloaded file is still
+    /// there is not looked at (a property must not touch the disk); <see cref="InstallAsync"/> downloads again if it is gone.
+    /// </summary>
+    public bool CanInstall => HasInstaller && !IsBusy && !IsInstallerRefused
+        && (State == UpdateState.Available || (State == UpdateState.Downloaded && _options.LaunchInstaller && _download is not null));
 
     /// <summary>
     /// Gets the progress of the download that is running or ran last, or null before the first chunk of a download.
@@ -367,7 +414,8 @@ public sealed partial class UpdateController
     /// Downloads and verifies the installer of the version that was found, without starting it, so that
     /// <see cref="InstallAsync"/> can start it later without downloading again. Does nothing if no version was found, it
     /// is already downloaded, or a check, download or installation is running. A failure is reported to
-    /// <see cref="IUpdatePresenter.ReportInstallFailed"/> and leaves the state at <see cref="UpdateState.Available"/>.
+    /// <see cref="IUpdatePresenter.ReportInstallFailed"/> and leaves the state at <see cref="UpdateState.Available"/>. So is
+    /// an installer that the verifier refused earlier (<see cref="IsInstallerRefused"/>), which is not downloaded again.
     /// </summary>
     /// <param name="cancellationToken">Cancels the download.</param>
     /// <returns>A task that completes when the download ended.</returns>
@@ -386,9 +434,16 @@ public sealed partial class UpdateController
             return;
         }
 
+        if (RefusalOf(update) is { } known)
+        {
+            ReportRefusal(update, known);
+            return;
+        }
+
         _installing = true;
         try
         {
+            ResetProgress();
             SetState(UpdateState.Downloading, update);
             Present(() => _presenter.ReportDownloading(update));
             DownloadResult download;
@@ -403,7 +458,7 @@ public sealed partial class UpdateController
             }
             catch (Exception ex)
             {
-                FailInstallation(update, ex);
+                FailInstallation(update, ex, UpdateFailureStage.Download);
                 return;
             }
 
@@ -447,6 +502,12 @@ public sealed partial class UpdateController
             return;
         }
 
+        if (RefusalOf(update) is { } refused)
+        {
+            ReportRefusal(update, refused);
+            return;
+        }
+
         _installing = true;
         try
         {
@@ -455,7 +516,13 @@ public sealed partial class UpdateController
                 return;
             }
 
+            if (_download is not { } existing || !File.Exists(existing.FilePath))
+            {
+                ResetProgress();
+            }
+
             SetState(UpdateState.Installing, update);
+            var stage = UpdateFailureStage.Download;
             try
             {
                 // From here on the file is kept for another try whatever goes wrong, unless FailInstallation finds that it
@@ -467,6 +534,7 @@ public sealed partial class UpdateController
                     _download = download;
                 }
 
+                stage = UpdateFailureStage.Install;
                 if (!_options.LaunchInstaller)
                 {
                     SetState(UpdateState.Downloaded, update);
@@ -502,7 +570,7 @@ public sealed partial class UpdateController
             }
             catch (Exception ex)
             {
-                FailInstallation(update, ex);
+                FailInstallation(update, ex, stage);
             }
         }
         finally
@@ -528,14 +596,26 @@ public sealed partial class UpdateController
     /// </summary>
     /// <param name="update">The update that was being downloaded or installed.</param>
     /// <param name="error">Why it failed.</param>
-    private void FailInstallation(AvailableUpdate update, Exception error)
+    /// <param name="stage">Whether it failed while downloading or while installing.</param>
+    private void FailInstallation(AvailableUpdate update, Exception error, UpdateFailureStage stage)
     {
         if (error is UpdaterException and not InstallerLaunchException)
         {
             _download = null;
         }
 
-        SetState(Resting, update, error);
+        if (error is InstallerVerificationException refusal && update.SelectedAsset is { } refusedAsset)
+        {
+            Volatile.Write(ref _refused, new Refusal(refusedAsset, refusal, stage));
+
+            // It will not be started, nor downloaded again, so nothing else would clean it up.
+            if (refusal.FilePath is { } refusedFile)
+            {
+                TryDelete(refusedFile);
+            }
+        }
+
+        SetState(Resting, update, new UpdateFailure(stage, error, UserInitiated: true));
         Present(() => _presenter.ReportInstallFailed(update, error));
     }
 
@@ -555,8 +635,7 @@ public sealed partial class UpdateController
             await DeleteOldDownloadsAsync(AssetDownloader.SanitizeFileName(update.SelectedAsset!.Name), () => true).ConfigureAwait(true);
         }
 
-        var generation = Interlocked.Increment(ref _downloadGeneration);
-        Volatile.Write(ref _progress, null);
+        var generation = Volatile.Read(ref _downloadGeneration);
         var progress = new Progress<DownloadProgress>(value => ApplyProgress(generation, update, value));
         var download = await _updater.DownloadAsync(check, _downloadDirectory, progress, cancellationToken).ConfigureAwait(true);
         if (!_options.LaunchInstaller && _options.RequireVerifiedDownload && !download.Verified)
@@ -566,7 +645,51 @@ public sealed partial class UpdateController
             throw new UpdaterException($"The download of '{download.Asset.Name}' was not checksum-verified and RequireVerifiedDownload is enabled, so it is not offered.");
         }
 
+        try
+        {
+            // Better known now than when the user has decided to install; the check is made again just before the start.
+            await _updater.VerifyDownloadAsync(download, cancellationToken).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not InstallerVerificationException)
+        {
+            // The check could not be made or was cancelled, so the package is not offered, and a finished file is not
+            // resumed but replaced by the next download. A refusal is dealt with by FailInstallation.
+            TryDelete(download.FilePath);
+            throw;
+        }
+
         return download;
+    }
+
+    /// <summary>
+    /// Finds the refusal that applies to the installer of an update.
+    /// </summary>
+    /// <param name="update">The update.</param>
+    /// <returns>The refusal, or null if its installer was not refused.</returns>
+    private Refusal? RefusalOf(AvailableUpdate update) =>
+        Volatile.Read(ref _refused) is { } refusal && refusal.Asset.IsSameUpload(update.SelectedAsset) ? refusal : null;
+
+    /// <summary>
+    /// Tells the user that the installer is refused again, without downloading it once more, since the same file would
+    /// be refused again.
+    /// </summary>
+    /// <param name="update">The update.</param>
+    /// <param name="refusal">The refusal of its installer.</param>
+    private void ReportRefusal(AvailableUpdate update, Refusal refusal)
+    {
+        SetState(Resting, update, new UpdateFailure(refusal.Stage, refusal.Error, UserInitiated: true));
+        Present(() => _presenter.ReportInstallFailed(update, refusal.Error));
+    }
+
+    /// <summary>
+    /// Forgets the progress of the earlier download and starts a new generation, so that a late report of the earlier one
+    /// is ignored. It is done before the state changes to the download, so that the first <see cref="Changed"/> of the
+    /// download already shows no progress.
+    /// </summary>
+    private void ResetProgress()
+    {
+        Interlocked.Increment(ref _downloadGeneration);
+        Volatile.Write(ref _progress, null);
     }
 
     /// <summary>
@@ -642,7 +765,13 @@ public sealed partial class UpdateController
     private async Task CheckCoreAsync(bool manual, bool bypassThrottle, CancellationToken cancellationToken)
     {
         var before = State;
-        var errorBefore = LastError;
+        var failureBefore = LastFailure;
+        if (manual)
+        {
+            // The user asks again, for instance after the verifier was changed, so a refused installer may be tried anew.
+            Volatile.Write(ref _refused, null);
+        }
+
         _runningManual = manual;
         SetState(UpdateState.Checking, Available);
         UpdateCheckResult check;
@@ -654,7 +783,7 @@ public sealed partial class UpdateController
         {
             // Only the caller's own cancellation can come out of CheckForUpdateAsync; either way the state must not stay
             // at Checking.
-            SetState(before, Available, errorBefore);
+            SetState(before, Available, failureBefore);
             throw;
         }
         finally
@@ -674,7 +803,7 @@ public sealed partial class UpdateController
         else if (check.Throttled)
         {
             // Nothing was asked of GitHub, so what was known before is still all there is.
-            SetState(before, Available, errorBefore);
+            SetState(before, Available, failureBefore);
         }
         else if (check.Update is not { } update)
         {
@@ -744,7 +873,7 @@ public sealed partial class UpdateController
     /// <param name="manual">True if the user asked for the check and is told.</param>
     private void Fail(Exception? error, bool manual)
     {
-        SetState(Available is null ? UpdateState.Failed : Resting, Available, error);
+        SetState(Available is null ? UpdateState.Failed : Resting, Available, error is null ? null : new UpdateFailure(UpdateFailureStage.Check, error, manual));
         if (manual)
         {
             Present(() => _presenter.ReportCheckFailed(error));
@@ -824,16 +953,16 @@ public sealed partial class UpdateController
     /// </summary>
     /// <param name="state">The new state.</param>
     /// <param name="available">The newer version waiting to be installed, if any.</param>
-    /// <param name="error">Why this state follows a failure, or null; a state that differs from the last one clears an earlier error.</param>
-    private void SetState(UpdateState state, AvailableUpdate? available, Exception? error = null)
+    /// <param name="failure">Why this state follows a failure, or null; a state that differs from the last one clears an earlier failure.</param>
+    private void SetState(UpdateState state, AvailableUpdate? available, UpdateFailure? failure = null)
     {
-        if (error is not null)
+        if (failure is not null)
         {
-            LastError = error;
+            LastFailure = failure;
         }
         else if (state != State)
         {
-            LastError = null;
+            LastFailure = null;
         }
 
         State = state;

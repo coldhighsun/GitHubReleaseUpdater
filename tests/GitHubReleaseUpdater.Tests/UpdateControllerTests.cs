@@ -1336,6 +1336,523 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// A failed installation records its stage and that the user asked for it.
+    /// </summary>
+    [Fact]
+    public async Task Last_failure_of_an_installation_names_the_install_stage()
+    {
+        var failure = new IOException("held by a scanner");
+        _launcher.Failure = failure;
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        var recorded = Assert.IsType<UpdateFailure>(controller.LastFailure);
+        Assert.Equal(UpdateFailureStage.Install, recorded.Stage);
+        Assert.True(recorded.UserInitiated);
+        Assert.Same(failure, recorded.Error);
+        Assert.Same(failure, controller.LastError);
+    }
+
+    /// <summary>
+    /// A download that fails, started with DownloadAsync or by InstallAsync, names the download stage.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Last_failure_of_a_download_names_the_download_stage(bool throughInstall)
+    {
+        var controller = Create(checksums: new StaticChecksumProvider(new string('a', 64)));
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        if (throughInstall)
+        {
+            await controller.InstallAsync(TestContext.Current.CancellationToken);
+        }
+        else
+        {
+            await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(UpdateFailureStage.Download, controller.LastFailure?.Stage);
+        Assert.IsType<ChecksumMismatchException>(controller.LastFailure?.Error);
+        Assert.True(controller.LastFailure?.UserInitiated);
+    }
+
+    /// <summary>
+    /// A failed check names the check stage and is the user's only when the user asked for it.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Last_failure_of_a_check_says_whether_the_user_asked(bool manual)
+    {
+        _client.ThrowOnFetch = new HttpRequestException("offline");
+        var controller = Create();
+
+        await controller.CheckAsync(manual, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateFailureStage.Check, controller.LastFailure?.Stage);
+        Assert.Equal(manual, controller.LastFailure?.UserInitiated);
+    }
+
+    /// <summary>
+    /// The properties that say what can be done follow the state.
+    /// </summary>
+    [Fact]
+    public async Task Can_properties_follow_the_state()
+    {
+        var controller = Create();
+        Assert.False(controller.CanDownload);
+        Assert.False(controller.CanInstall);
+        Assert.False(controller.IsBusy);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        Assert.True(controller.CanDownload);
+        Assert.True(controller.CanInstall);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        Assert.False(controller.CanDownload);
+        Assert.True(controller.CanInstall);
+        Assert.False(controller.IsBusy);
+    }
+
+    /// <summary>
+    /// Nothing can be done while the user is being asked, and a package that is only downloaded cannot be started.
+    /// </summary>
+    [Fact]
+    public async Task Can_properties_are_false_while_busy_and_without_launching()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        var gate = new TaskCompletionSource<bool>();
+        _presenter.ConfirmGate = gate.Task;
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.True(controller.IsBusy);
+        Assert.False(controller.CanDownload);
+        Assert.False(controller.CanInstall);
+        gate.SetResult(true);
+        await install;
+
+        var archive = Create(launchInstaller: false);
+        await archive.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await archive.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(UpdateState.Downloaded, archive.State);
+        Assert.False(archive.CanInstall);
+    }
+
+    /// <summary>
+    /// A release without a package offers nothing.
+    /// </summary>
+    [Fact]
+    public async Task Can_properties_are_false_for_a_release_without_a_package()
+    {
+        _client.Latest = TestData.Release("v2.0.0", "notes.txt");
+        var controller = Create();
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.False(controller.CanDownload);
+        Assert.False(controller.CanInstall);
+    }
+
+    /// <summary>
+    /// An installer that the verifier refuses fails the installation at the install stage and is dropped.
+    /// </summary>
+    [Fact]
+    public async Task Installer_that_the_verifier_refuses_fails_the_installation()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new FixedVerifier(InstallerVerificationResult.Invalid("not signed by us")),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateFailureStage.Download, controller.LastFailure?.Stage);
+        var refused = Assert.IsType<InstallerVerificationException>(controller.LastFailure?.Error);
+        Assert.Equal("not signed by us", refused.Reason);
+        Assert.Null(controller.DownloadedFile);
+    }
+
+    /// <summary>
+    /// A refused installer is reported again for the same asset without downloading it once more, and the install entry goes.
+    /// </summary>
+    [Fact]
+    public async Task Refused_installer_is_not_downloaded_again()
+    {
+        var controller = RefusingController();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.True(controller.IsInstallerRefused);
+        Assert.False(controller.CanInstall);
+        Assert.False(controller.CanDownload);
+        Assert.Empty(Directory.EnumerateFiles(_directory, Installer, SearchOption.AllDirectories));
+        Assert.Equal(1, _presenter.Downloading);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Equal(2, _presenter.InstallFailures.Count);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Equal(3, _presenter.InstallFailures.Count);
+        Assert.IsType<InstallerVerificationException>(_presenter.InstallFailures[1]);
+        Assert.Equal(UpdateFailureStage.Download, controller.LastFailure?.Stage);
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// A manual check, or another asset being offered, allows a new try.
+    /// </summary>
+    [Theory]
+    [InlineData("manual")]
+    [InlineData("new asset")]
+    public async Task Refused_installer_is_tried_again_after_a_manual_check_or_another_asset(string how)
+    {
+        var controller = RefusingController();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.True(controller.IsInstallerRefused);
+
+        if (how == "manual")
+        {
+            await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
+        }
+        else
+        {
+            _client.Latest = new GitHubRelease
+            {
+                Id = 1,
+                TagName = "v3.0.0",
+                Assets = [new GitHubAsset { Id = 77, Name = Installer, Size = 10, BrowserDownloadUrl = "https://github.com/o/r/releases/download/v3.0.0/" + Installer }],
+            };
+            await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        }
+
+        Assert.False(controller.IsInstallerRefused);
+        Assert.True(controller.CanInstall);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(2, _presenter.Downloading);
+    }
+
+    /// <summary>
+    /// A verifier that gives no verdict at all is treated as a refusal, not as a crash.
+    /// </summary>
+    [Fact]
+    public async Task Verifier_without_a_verdict_refuses_the_installer()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new FixedVerifier(null!),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.IsType<InstallerVerificationException>(controller.LastError);
+        Assert.True(controller.IsInstallerRefused);
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// The verifier is asked right after the download, so a refused package is known before the user decides to install,
+    /// and the file is not kept.
+    /// </summary>
+    [Fact]
+    public async Task Download_alone_already_shows_a_refusal_and_keeps_nothing()
+    {
+        var controller = RefusingController();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(controller.IsInstallerRefused);
+        Assert.False(controller.CanInstall);
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Equal(UpdateFailureStage.Download, controller.LastFailure?.Stage);
+        Assert.IsType<InstallerVerificationException>(_presenter.InstallFailures.Single());
+        Assert.Empty(Directory.EnumerateFiles(_directory, Installer, SearchOption.AllDirectories));
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// A package that only is downloaded, never started, is checked too.
+    /// </summary>
+    [Fact]
+    public async Task Download_only_mode_refuses_the_package_too()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new FixedVerifier(InstallerVerificationResult.Invalid("not signed by us")),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, LaunchInstaller = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+        Assert.IsType<InstallerVerificationException>(controller.LastError);
+        Assert.Empty(_presenter.PackagesDownloaded);
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Equal(2, _presenter.InstallFailures.Count);
+    }
+
+    /// <summary>
+    /// A package that passed after the download is checked again when it is about to be started.
+    /// </summary>
+    [Fact]
+    public async Task Package_that_passed_the_download_check_is_checked_again_before_the_start()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new SequenceVerifier(InstallerVerificationResult.Valid(), InstallerVerificationResult.Invalid("changed its mind")),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateFailureStage.Install, controller.LastFailure?.Stage);
+        Assert.IsType<InstallerVerificationException>(controller.LastError);
+    }
+
+    /// <summary>
+    /// A verifier that gives its verdicts one after the other, the last one for every later call.
+    /// </summary>
+    /// <param name="results">The verdicts.</param>
+    private sealed class SequenceVerifier(params InstallerVerificationResult[] results) : IInstallerVerifier
+    {
+        /// <summary>
+        /// How many times it was asked.
+        /// </summary>
+        private int _calls;
+
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default) =>
+            Task.FromResult(results[Math.Min(Interlocked.Increment(ref _calls) - 1, results.Length - 1)]);
+    }
+
+    /// <summary>
+    /// A package whose check could not be made, or was cancelled, is not kept: it is not offered and the next download
+    /// replaces it.
+    /// </summary>
+    [Theory]
+    [InlineData("crash")]
+    [InlineData("cancel")]
+    public async Task Package_whose_check_failed_or_was_cancelled_is_not_kept(string how)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var verifier = new ActionVerifier(() =>
+        {
+            if (how == "cancel")
+            {
+                cancellation.Cancel();
+                throw new OperationCanceledException(cancellation.Token);
+            }
+
+            throw new InvalidOperationException("the signature service is down");
+        });
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = verifier,
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        if (how == "cancel")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => controller.DownloadAsync(cancellation.Token));
+        }
+        else
+        {
+            await controller.DownloadAsync(TestContext.Current.CancellationToken);
+            Assert.IsType<InvalidOperationException>(controller.LastError);
+        }
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+        Assert.False(controller.IsInstallerRefused);
+        Assert.Empty(Directory.EnumerateFiles(_directory, Installer, SearchOption.AllDirectories));
+    }
+
+    /// <summary>
+    /// A verifier that runs the given action.
+    /// </summary>
+    /// <param name="action">What it does.</param>
+    private sealed class ActionVerifier(Action action) : IInstallerVerifier
+    {
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default)
+        {
+            action();
+            return Task.FromResult(InstallerVerificationResult.Valid());
+        }
+    }
+
+    /// <summary>
+    /// A verifier that hands back no task at all is treated as a refusal too.
+    /// </summary>
+    [Fact]
+    public async Task Verifier_without_a_task_refuses_the_installer()
+    {
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new NoTaskVerifier(),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.IsType<InstallerVerificationException>(controller.LastError);
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// A verifier that returns null instead of a task.
+    /// </summary>
+    private sealed class NoTaskVerifier : IInstallerVerifier
+    {
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default) => null!;
+    }
+
+    /// <summary>
+    /// Builds a controller whose verifier refuses every installer.
+    /// </summary>
+    /// <returns>The controller.</returns>
+    private UpdateController RefusingController() => new(
+        new ReleaseUpdater(
+            new UpdaterOptions
+            {
+                Owner = "o",
+                Repo = "r",
+                CurrentVersion = "1.0.0",
+                AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                ChecksumProvider = NoChecksumProvider.Instance,
+                InstallerLauncher = _launcher,
+                InstallerVerifier = new FixedVerifier(InstallerVerificationResult.Invalid("not signed by us")),
+                TimeProvider = _time,
+            },
+            _client),
+        _presenter,
+        new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, AskToInstallAfterManualCheck = false, TimeProvider = _time });
+
+    /// <summary>
+    /// A verifier that throws fails the installation at the install stage, without starting anything.
+    /// </summary>
+    [Fact]
+    public async Task Verifier_that_throws_fails_the_installation_cleanly()
+    {
+        var failure = new InvalidOperationException("the signature service is down");
+        var controller = new UpdateController(
+            new ReleaseUpdater(
+                new UpdaterOptions
+                {
+                    Owner = "o",
+                    Repo = "r",
+                    CurrentVersion = "1.0.0",
+                    AssetSelector = new DelegateAssetSelector(a => a.Name == Installer),
+                    ChecksumProvider = NoChecksumProvider.Instance,
+                    InstallerLauncher = _launcher,
+                    InstallerVerifier = new ThrowingVerifier(failure),
+                    TimeProvider = _time,
+                },
+                _client),
+            _presenter,
+            new UpdateControllerOptions { DownloadDirectory = _directory, RequireVerifiedDownload = false, TimeProvider = _time });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(UpdateFailureStage.Download, controller.LastFailure?.Stage);
+        Assert.Same(failure, controller.LastError);
+        Assert.NotEqual(UpdateState.Installing, controller.State);
+    }
+
+    /// <summary>
     /// The last error is set with the state that follows a failure and cleared by the next change of state.
     /// </summary>
     [Fact]
@@ -1536,6 +2053,31 @@ public sealed class UpdateControllerTests : IDisposable
         await WaitUntilAsync(() => controller.Sweeps == 1);
         await cts.CancelAsync();
         await loop;
+    }
+
+    /// <summary>
+    /// The first change of state of a download already shows no progress, not the progress of the earlier download.
+    /// </summary>
+    [Fact]
+    public async Task Progress_is_clear_when_a_download_starts()
+    {
+        var controller = Create(checksums: new StaticChecksumProvider(new string('a', 64)));
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => controller.Progress is not null);
+        var seen = new List<DownloadProgress?>();
+        controller.Changed += (_, _) =>
+        {
+            if (controller.State == UpdateState.Downloading)
+            {
+                seen.Add(controller.Progress);
+            }
+        };
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.NotEmpty(seen);
+        Assert.Null(seen[0]);
     }
 
     /// <summary>
@@ -1922,6 +2464,28 @@ public sealed class UpdateControllerTests : IDisposable
             Launched.Add((installerPath, options));
             return new InstallerLaunchResult(installerPath, ProcessId);
         }
+    }
+
+    /// <summary>
+    /// A verifier that throws.
+    /// </summary>
+    /// <param name="failure">What it throws.</param>
+    private sealed class ThrowingVerifier(Exception failure) : IInstallerVerifier
+    {
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default) =>
+            throw failure;
+    }
+
+    /// <summary>
+    /// A verifier that always gives the same verdict.
+    /// </summary>
+    /// <param name="result">The verdict.</param>
+    private sealed class FixedVerifier(InstallerVerificationResult? result) : IInstallerVerifier
+    {
+        /// <inheritdoc />
+        public Task<InstallerVerificationResult> VerifyAsync(string installerPath, CancellationToken cancellationToken = default) =>
+            Task.FromResult(result!);
     }
 
     /// <summary>

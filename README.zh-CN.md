@@ -104,7 +104,8 @@ await controller.CheckAsync(manual: true);    // “检查更新”按钮
 await controller.InstallAsync();              // “更新到 x.y.z”
 ```
 
-- **状态：** `Idle`、`Checking`、`UpToDate`、`Available`、`Failed`、`Installing`、`Downloading`、`Downloaded`；每次变化触发 `Changed`。`LastError` 与 `Progress`（及 `ProgressChanged`）给出最近的失败原因和下载进度。
+- **状态：** `Idle`、`Checking`、`UpToDate`、`Available`、`Failed`、`Installing`、`Downloading`、`Downloaded`；每次变化触发 `Changed`。`LastFailure`（`Stage`：检查、下载或安装；`Error`；`UserInitiated`）与 `Progress`（及 `ProgressChanged`）给出最近的失败和下载进度，`LastError` 是其中的异常。自动检查失败时 `UserInitiated` 为 false，应用通常不显示。
+- `CanDownload`、`CanInstall`、`IsBusy` 表示此刻调用 `DownloadAsync()` / `InstallAsync()` 会做什么，界面可以直接绑定，不必自己从 `State` 推断。
 - **手动检查**绕过节流和已跳过的版本；自动检查期间收到的手动检查会在其结束后立即执行。`SkipVersionAsync()` 把找到的版本记为已跳过。
 - `DownloadAsync()` 提前下载并校验；之后 `InstallAsync()` 直接启动安装程序，不会再下载。
 - 比当前版本新、但没有匹配安装包的发布会停在 `Available`，`HasInstaller == false`——只在 `HasInstaller` 为 true 时才显示安装入口。
@@ -170,10 +171,11 @@ await updater.LaunchInstallerAsync(file, new InstallerLaunchOptions { Arguments 
 - `InstallerLaunchOptions`：`Arguments`、`WorkingDirectory`、`RequireVerified`；预设 `InnoSetupSilent`、`InnoSetupVerySilent`。
 - 下载失败、被取消或未通过校验时不会启动安装程序。启动前会重新计算哈希，下载后被改动的文件不会被运行（抛 `ChecksumMismatchException`）。
 - 通过 `UpdaterOptions.InstallerLauncher` 可自定义或替换启动方式。
+- **签名检查：** 校验和来自同一个发布，能改发布的人可以把两者一起改掉。设置 `UpdaterOptions.InstallerVerifier` 可在安装程序启动前再检查一次，被拒绝的不会启动（抛 `InstallerVerificationException`，带 `Reason`）。`UpdateController` 在下载完成后立刻检查一次（只下载不启动，即 `LaunchInstaller` 关闭时也检查），被拒绝的包不会被提供，启动前再检查一次。`AuthenticodeInstallerVerifier` 用操作系统检查 Windows 安装程序的 Authenticode 签名，并可用 `ExpectedSubjects`（签名证书的完整主题名，如 `CN=Contoso Ltd, O=Contoso Ltd, L=Redmond, C=US`——固定发布者的常规做法，因为只看通用名并不唯一，而指纹每次续期都会变）、`ExpectedPublishers`（只比通用名）或 `ExpectedThumbprints`（SHA-1 或 SHA-256）限定签名者；给出的每一类都必须匹配，都不设则任何人的有效签名都通过。在 Windows 上，文件从哈希检查开始一直以只读方式保持打开，直到安装程序启动，所以中间不能被替换（其他系统上 .NET 的文件共享只是建议性的，请保持下载目录私有）。被校验器拒绝的安装程序会被删除，同一个资源不会再次下载（见 `IsInstallerRefused`）；手动检查可以再试一次。不做在线吊销检查。在其他系统上它会拒绝一切（见 `AuthenticodeInstallerVerifier.IsSupported`），所以只在 Windows 上设置。其他签名方案可自己实现 `IInstallerVerifier`。
 
 ## 异常
 
-均派生自 `UpdaterException`：`GitHubApiException`（`StatusCode`、`IsRateLimited`、`RateLimitResetAt`）、`AssetNotFoundException`（`AvailableAssets`）、`ChecksumMismatchException`（`Expected`/`Actual`）、`InstallerLaunchException`（`FilePath`、`IsUserCancelled`）。
+均派生自 `UpdaterException`：`GitHubApiException`（`StatusCode`、`IsRateLimited`、`RateLimitResetAt`）、`AssetNotFoundException`（`AvailableAssets`）、`ChecksumMismatchException`（`Expected`/`Actual`）、`InstallerLaunchException`（`FilePath`、`IsUserCancelled`）、`InstallerVerificationException`（`FilePath`、`Reason`）。
 
 `CheckForUpdateAsync()` 捕获所有异常并通过 `Success`/`Error` 返回；只有调用方主动取消才抛 `OperationCanceledException`。`DownloadAsync()` 会抛异常。
 

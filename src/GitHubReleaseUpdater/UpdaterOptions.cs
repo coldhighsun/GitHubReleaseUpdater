@@ -38,6 +38,16 @@ public sealed class UpdaterOptions
     public Func<Uri, Uri>? AssetUrlRewriter { get; init; }
 
     /// <summary>
+    /// An extra check of the installer on top of the checksum, such as
+    /// <see cref="Verification.AuthenticodeInstallerVerifier"/> for a signed Windows installer. It is made just before the
+    /// installer is started; an installer it refuses is not started and
+    /// <see cref="Exceptions.InstallerVerificationException"/> is thrown. <see cref="AutoUpdate.UpdateController"/> asks
+    /// right after every download as well, also when it only downloads, so the verifier may be called twice for one file and
+    /// for a package that is never started. Null checks nothing more.
+    /// </summary>
+    public Verification.IInstallerVerifier? InstallerVerifier { get; init; }
+
+    /// <summary>
     /// API base URL. Null uses <c>https://api.github.com/</c>. For GitHub Enterprise Server use <c>https://HOST/api/v3/</c>.
     /// </summary>
     public Uri? BaseUrl { get; init; }
