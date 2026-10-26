@@ -290,6 +290,36 @@ public sealed class SemanticVersion : IComparable<SemanticVersion>, IEquatable<S
     }
 
     /// <summary>
+    /// Formats the version, optionally leaving out the build metadata (the part after <c>+</c>, such as a commit hash),
+    /// which is not part of a version's identity and is usually unwanted in text shown to users.
+    /// </summary>
+    /// <param name="includeMetadata">True to append <see cref="BuildMetadata"/> as <see cref="ToString()"/> does.</param>
+    /// <returns>The version as text.</returns>
+    public string ToString(bool includeMetadata)
+    {
+        return includeMetadata ? ToString() : new SemanticVersion(Major, Minor, Patch, Prerelease).ToString();
+    }
+
+    /// <summary>
+    /// Reads the version of an assembly from its <see cref="System.Reflection.AssemblyInformationalVersionAttribute"/>,
+    /// which is where tools such as MinVer put the full SemVer (pre-release and build metadata included); the plain
+    /// four-part assembly version cannot hold those. An assembly without that attribute, or with a value that is not a
+    /// version, gives <see langword="false"/> instead of a made-up version, so a build without version information is not
+    /// mistaken for <c>0.0.0</c>.
+    /// </summary>
+    /// <param name="assembly">The assembly to read, usually the running application's.</param>
+    /// <param name="version">The version, or null if the assembly has none.</param>
+    /// <param name="tagPrefix">Optional prefix to strip before parsing; see <see cref="TryParse"/>.</param>
+    /// <returns>True if a version was read.</returns>
+    public static bool TryFromAssembly(System.Reflection.Assembly assembly, [NotNullWhen(true)] out SemanticVersion? version, string? tagPrefix = null)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        var informational = System.Reflection.CustomAttributeExtensions
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(assembly)?.InformationalVersion;
+        return TryParse(informational, out version, tagPrefix);
+    }
+
+    /// <summary>
     /// Implicit conversion from string using <see cref="Parse(string, string?)"/>.
     /// </summary>
     public static implicit operator SemanticVersion(string value) => Parse(value);
