@@ -1,5 +1,3 @@
-using System.ComponentModel;
-using System.Diagnostics;
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.Installation;
@@ -36,7 +34,7 @@ namespace GitHubReleaseUpdater.AutoUpdate;
 /// presenter are called on the context the call was made on.
 /// </para>
 /// </remarks>
-public sealed class UpdateController
+public sealed partial class UpdateController
 {
     /// <summary>
     /// Checks for, downloads and launches updates.
@@ -97,6 +95,22 @@ public sealed class UpdateController
     private volatile bool _leftoversWanted;
 
     /// <summary>
+    /// The latest progress, held in an object so that it is read and written as a whole by different threads.
+    /// </summary>
+    private ProgressBox? _progress;
+
+    /// <summary>
+    /// Counts the downloads, so that a late progress report of an earlier one is ignored.
+    /// </summary>
+    private int _downloadGeneration;
+
+    /// <summary>
+    /// How many times a check found the application up to date and cleaned the download directory, so that a round of
+    /// <see cref="RunAsync"/> can tell whether it still has to.
+    /// </summary>
+    private int _cleanups;
+
+    /// <summary>
     /// Whether the check that is running was asked for by the user.
     /// </summary>
     private bool _runningManual;
@@ -153,6 +167,12 @@ public sealed class UpdateController
     public event EventHandler? Changed;
 
     /// <summary>
+    /// Raised each time a chunk of the package arrived, with <see cref="Progress"/> updated. It is raised for every chunk,
+    /// so a handler that updates a display should only react to a change of the whole percent.
+    /// </summary>
+    public event EventHandler? ProgressChanged;
+
+    /// <summary>
     /// Gets what the controller is doing or found last.
     /// </summary>
     public UpdateState State { get; private set; }
@@ -161,6 +181,18 @@ public sealed class UpdateController
     /// Gets the newer version waiting to be installed, or null if none is known.
     /// </summary>
     public AvailableUpdate? Available { get; private set; }
+
+    /// <summary>
+    /// Gets why the last check, download or installation failed, or null. It is set together with the state change that
+    /// follows the failure, so a <see cref="Changed"/> handler sees it, and cleared by the next change of state. A manual
+    /// check that only finds a release without a package is not a failure and leaves it null.
+    /// </summary>
+    public Exception? LastError { get; private set; }
+
+    /// <summary>
+    /// Gets the progress of the download that is running or ran last, or null before the first chunk of a download.
+    /// </summary>
+    public DownloadProgress? Progress => Volatile.Read(ref _progress)?.Value;
 
     /// <summary>
     /// Gets the full path of the downloaded package once <see cref="State"/> is <see cref="UpdateState.Downloaded"/>, or null.
@@ -182,7 +214,11 @@ public sealed class UpdateController
     /// <summary>
     /// Checks for updates by itself: once after <see cref="UpdateControllerOptions.InitialDelay"/>, then every
     /// <see cref="UpdateControllerOptions.CheckInterval"/>, skipping the rounds in which
-    /// <see cref="UpdateControllerOptions.IsAutoCheckEnabled"/> says no. Runs until cancelled.
+    /// <see cref="UpdateControllerOptions.IsAutoCheckEnabled"/> says no (or, with
+    /// <see cref="UpdateControllerOptions.SkipChecksWhileUpdateKnown"/>, a newer version is already known). When the
+    /// updater has a <see cref="UpdaterOptions.MinimumCheckInterval"/> that is not longer than the check interval, only the
+    /// first round is throttled by it, so that a check interval equal to the minimum interval is not skipped every
+    /// other time. Runs until cancelled.
     /// </summary>
     /// <param name="cancellationToken">Stops the loop, for example when the application closes.</param>
     /// <returns>A task that completes when cancelled; it does not throw because of the cancellation.</returns>
@@ -191,13 +227,26 @@ public sealed class UpdateController
         try
         {
             var delay = _options.InitialDelay;
+            var checkedOnce = false;
             while (true)
             {
                 await Task.Delay(delay, _time, cancellationToken).ConfigureAwait(true);
+                var cleansBefore = _cleanups;
                 delay = _options.CheckInterval;
-                if (IsAutoCheckEnabled())
+                if (IsAutoCheckEnabled() && !(_options.SkipChecksWhileUpdateKnown && Available is not null))
                 {
-                    await CheckAsync(manual: false, cancellationToken).ConfigureAwait(true);
+
+                    // The updater would skip a round that comes exactly one minimum interval after the last check, because
+                    // the last check was recorded when it ended, a little after the round began. The rounds are already
+                    // spaced by CheckInterval, so when that is not shorter than the minimum interval only the first
+                    // round, which follows a restart, is left to the updater's throttling.
+                    var bypassThrottle = checkedOnce && _updater.Options.MinimumCheckInterval is { } minimum && _options.CheckInterval >= minimum;
+                    checkedOnce |= await RunCheckAsync(manual: false, bypassThrottle, cancellationToken).ConfigureAwait(true);
+                }
+
+                if (_cleanups == cleansBefore)
+                {
+                    await SweepLeftoversAsync().ConfigureAwait(true);
                 }
             }
         }
@@ -221,7 +270,17 @@ public sealed class UpdateController
     /// <param name="cancellationToken">Cancels the check.</param>
     /// <returns>A task that completes when the check, and whatever the user is asked after it, is done.</returns>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    public async Task CheckAsync(bool manual, CancellationToken cancellationToken = default)
+    public async Task CheckAsync(bool manual, CancellationToken cancellationToken = default) =>
+        await RunCheckAsync(manual, bypassThrottle: false, cancellationToken).ConfigureAwait(true);
+
+    /// <summary>
+    /// Makes a check as <see cref="CheckAsync"/> does, and tells whether one was made.
+    /// </summary>
+    /// <param name="manual">True if the user asked for the check.</param>
+    /// <param name="bypassThrottle">True to ignore the minimum interval of the updater, as a manual check does.</param>
+    /// <param name="cancellationToken">Cancels the check.</param>
+    /// <returns>False if the call only queued a manual check or did nothing because a check or an installation was running.</returns>
+    private async Task<bool> RunCheckAsync(bool manual, bool bypassThrottle, CancellationToken cancellationToken)
     {
         if (State == UpdateState.Checking)
         {
@@ -230,23 +289,25 @@ public sealed class UpdateController
                 _manualQueued = true;
             }
 
-            return;
+            return false;
         }
 
         if (State == UpdateState.Installing || _installing)
         {
-            return;
+            return false;
         }
 
         _manualQueued = false;
         try
         {
-            await CheckCoreAsync(manual, cancellationToken).ConfigureAwait(true);
+            await CheckCoreAsync(manual, bypassThrottle, cancellationToken).ConfigureAwait(true);
             if (_manualQueued)
             {
                 _manualQueued = false;
-                await CheckCoreAsync(manual: true, cancellationToken).ConfigureAwait(true);
+                await CheckCoreAsync(manual: true, bypassThrottle: false, cancellationToken).ConfigureAwait(true);
             }
+
+            return true;
         }
         finally
         {
@@ -474,7 +535,7 @@ public sealed class UpdateController
             _download = null;
         }
 
-        SetState(Resting, update);
+        SetState(Resting, update, error);
         Present(() => _presenter.ReportInstallFailed(update, error));
     }
 
@@ -493,7 +554,9 @@ public sealed class UpdateController
             await DeleteOldDownloadsAsync(update.SelectedAsset!.Name, () => true).ConfigureAwait(true);
         }
 
-        var progress = new Progress<DownloadProgress>(value => Present(() => _presenter.ReportProgress(update, value)));
+        var generation = Interlocked.Increment(ref _downloadGeneration);
+        Volatile.Write(ref _progress, null);
+        var progress = new Progress<DownloadProgress>(value => ApplyProgress(generation, update, value));
         var download = await _updater.DownloadAsync(check, _downloadDirectory, progress, cancellationToken).ConfigureAwait(true);
         if (!_options.LaunchInstaller && _options.RequireVerifiedDownload && !download.Verified)
         {
@@ -506,165 +569,45 @@ public sealed class UpdateController
     }
 
     /// <summary>
-    /// Lets the application get ready for being ended by the installer. A failure or a timeout is reported and ignored.
+    /// Takes a progress report of a download. Reports are delivered asynchronously, so one of an earlier download may
+    /// arrive after the next has started; it is ignored.
     /// </summary>
-    /// <param name="cancellationToken">Cancels the wait.</param>
-    /// <returns>A task that completes when the application is ready or the time is up.</returns>
-    private async Task PrepareAsync(CancellationToken cancellationToken)
+    /// <param name="generation">The number of the download the report belongs to.</param>
+    /// <param name="update">The release being downloaded.</param>
+    /// <param name="value">The progress.</param>
+    internal void ApplyProgress(int generation, AvailableUpdate update, DownloadProgress value)
     {
-        if (_options.BeforeInstallAsync is not { } prepare)
+        if (Volatile.Read(ref _downloadGeneration) != generation)
         {
             return;
         }
 
+        Volatile.Write(ref _progress, new ProgressBox(value));
+
+        // Called for every chunk, so without closures: a handler or presenter that throws goes to OnError like elsewhere.
         try
         {
-            await prepare(cancellationToken).WaitAsync(_options.BeforeInstallTimeout, _time, cancellationToken).ConfigureAwait(true);
-        }
-        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
-        {
-            ReportError(ex);
-        }
-    }
-
-    /// <summary>
-    /// Waits for the installer to end, then for the grace period. An installer that cannot be watched, or that has no
-    /// process to watch, is given ten times the grace period instead.
-    /// </summary>
-    /// <param name="processId">The process of the installer, or null when none was started.</param>
-    /// <param name="launchedAt">When the installer was started (UTC), to tell its process from an unrelated one that got its id.</param>
-    /// <param name="cancellationToken">Cancels the wait.</param>
-    /// <returns>A task that completes when the installer is taken to have ended.</returns>
-    private async Task WaitForInstallerAsync(int? processId, DateTime launchedAt, CancellationToken cancellationToken)
-    {
-        var wait = _options.InstallerGracePeriod;
-        if (processId is null)
-        {
-            wait *= 10;
-        }
-        else
-        {
-            try
-            {
-                await (_options.WaitForProcessExitAsync ?? ((id, token) => WatchProcessAsync(id, launchedAt, token)))(processId.Value, cancellationToken).ConfigureAwait(true);
-            }
-            catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
-            {
-                // An elevated installer, for example, may not be watched from here.
-                wait *= 10;
-                ReportError(ex);
-            }
-        }
-
-        await Task.Delay(wait, _time, cancellationToken).ConfigureAwait(true);
-    }
-
-    /// <summary>
-    /// Tells whether a process with the installer's id can be the installer: it began no earlier than the installer was
-    /// started, give or take a little for clocks that differ in their last digits.
-    /// </summary>
-    /// <param name="startedAt">When the process began, in UTC.</param>
-    /// <param name="launchedAt">When the installer was started, in UTC.</param>
-    /// <returns>False if the process is older than the launch, so it only reuses the id.</returns>
-    internal static bool IsInstallerProcess(DateTime startedAt, DateTime launchedAt) =>
-        startedAt >= launchedAt.AddSeconds(-2);
-
-    /// <summary>
-    /// Waits for a process to end.
-    /// </summary>
-    /// <param name="processId">The process.</param>
-    /// <param name="launchedAt">When the installer was started (UTC); a process that began before that is not it.</param>
-    /// <param name="cancellationToken">Stops the wait.</param>
-    /// <returns>A task that completes when the process ended.</returns>
-    private static async Task WatchProcessAsync(int processId, DateTime launchedAt, CancellationToken cancellationToken)
-    {
-        Process process;
-        try
-        {
-            process = Process.GetProcessById(processId);
-        }
-        catch (ArgumentException)
-        {
-            // The installer is already gone.
-            return;
-        }
-
-        using (process)
-        {
-            try
-            {
-                if (!IsInstallerProcess(process.StartTime.ToUniversalTime(), launchedAt))
-                {
-                    // The installer ended and an unrelated process took its id.
-                    return;
-                }
-            }
-            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
-            {
-                // The start time of an elevated process cannot be read; it is taken to be the installer.
-            }
-
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Deletes what earlier downloads left in the download directory, off the calling thread. A file that cannot be
-    /// deleted stays. The disk work is one hop to the thread pool.
-    /// </summary>
-    /// <param name="keepName">
-    /// The file name of the package about to be downloaded, whose files are kept so that its partial file lets an
-    /// interrupted download go on; null to delete everything, as long as <paramref name="stillWanted"/> allows it.
-    /// </param>
-    /// <param name="stillWanted">Asked before each file; false stops the cleanup, for when the situation changed meanwhile.</param>
-    /// <returns>A task that completes when the files that could be deleted are deleted.</returns>
-    private async Task DeleteOldDownloadsAsync(string? keepName, Func<bool> stillWanted)
-    {
-        try
-        {
-            await Task.Run(() =>
-            {
-                if (!Directory.Exists(_downloadDirectory))
-                {
-                    return;
-                }
-
-                foreach (var file in Directory.EnumerateFiles(_downloadDirectory))
-                {
-                    if (!stillWanted())
-                    {
-                        return;
-                    }
-
-                    if (keepName is null || !Path.GetFileName(file).StartsWith(keepName, StringComparison.Ordinal))
-                    {
-                        TryDelete(file);
-                    }
-                }
-            }).ConfigureAwait(true);
+            ProgressChanged?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
-            // A chore on the side: whatever goes wrong with the directory must not fail the check or the download.
+            ReportError(ex);
+        }
+
+        try
+        {
+            _presenter.ReportProgress(update, value);
+        }
+        catch (Exception ex)
+        {
             ReportError(ex);
         }
     }
 
     /// <summary>
-    /// Deletes a file of an earlier download. A file that cannot be deleted, typically because it is still in use, stays.
+    /// Gets the number of the download that is running or ran last.
     /// </summary>
-    /// <param name="file">The file.</param>
-    private static void TryDelete(string file)
-    {
-        try
-        {
-            File.Delete(file);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Tried again next time.
-        }
-    }
+    internal int DownloadGeneration => Volatile.Read(ref _downloadGeneration);
 
     /// <summary>
     /// Records in the store, if it can, whether a newer release is waiting.
@@ -692,23 +635,25 @@ public sealed class UpdateController
     /// Makes one check and handles its outcome.
     /// </summary>
     /// <param name="manual">True if the user asked for the check.</param>
+    /// <param name="bypassThrottle">True to ignore the minimum interval of the updater although the check is not manual.</param>
     /// <param name="cancellationToken">Cancels the check.</param>
     /// <returns>A task that completes when the check, and whatever the user is asked after it, is done.</returns>
-    private async Task CheckCoreAsync(bool manual, CancellationToken cancellationToken)
+    private async Task CheckCoreAsync(bool manual, bool bypassThrottle, CancellationToken cancellationToken)
     {
         var before = State;
+        var errorBefore = LastError;
         _runningManual = manual;
         SetState(UpdateState.Checking, Available);
         UpdateCheckResult check;
         try
         {
-            check = await _updater.CheckForUpdateAsync(bypassSkippedVersion: manual, bypassThrottle: manual, cancellationToken: cancellationToken).ConfigureAwait(true);
+            check = await _updater.CheckForUpdateAsync(bypassSkippedVersion: manual, bypassThrottle: manual || bypassThrottle, cancellationToken: cancellationToken).ConfigureAwait(true);
         }
         catch (Exception)
         {
             // Only the caller's own cancellation can come out of CheckForUpdateAsync; either way the state must not stay
             // at Checking.
-            SetState(before, Available);
+            SetState(before, Available, errorBefore);
             throw;
         }
         finally
@@ -728,7 +673,7 @@ public sealed class UpdateController
         else if (check.Throttled)
         {
             // Nothing was asked of GitHub, so what was known before is still all there is.
-            SetState(before, Available);
+            SetState(before, Available, errorBefore);
         }
         else if (check.Update is not { } update)
         {
@@ -738,6 +683,8 @@ public sealed class UpdateController
             await SetPendingAsync(false).ConfigureAwait(true);
             if (_options.CleanDownloadDirectory)
             {
+                _cleanups++;
+
                 // Looked at again before each file, so that a download that starts meanwhile keeps its files.
                 await DeleteOldDownloadsAsync(null, () => _leftoversWanted).ConfigureAwait(true);
             }
@@ -774,9 +721,12 @@ public sealed class UpdateController
             await SetPendingAsync(true).ConfigureAwait(true);
             if (manual)
             {
-                // The user is asked right away, so a later automatic check need not announce this version again.
+                // The user sees the result of their check, so a later automatic check need not announce this version again.
                 _announced = update.Version;
-                await InstallAsync(cancellationToken).ConfigureAwait(true);
+                if (_options.AskToInstallAfterManualCheck)
+                {
+                    await InstallAsync(cancellationToken).ConfigureAwait(true);
+                }
             }
             else if (_announced != update.Version)
             {
@@ -793,7 +743,7 @@ public sealed class UpdateController
     /// <param name="manual">True if the user asked for the check and is told.</param>
     private void Fail(Exception? error, bool manual)
     {
-        SetState(Available is null ? UpdateState.Failed : Resting, Available);
+        SetState(Available is null ? UpdateState.Failed : Resting, Available, error);
         if (manual)
         {
             Present(() => _presenter.ReportCheckFailed(error));
@@ -873,11 +823,27 @@ public sealed class UpdateController
     /// </summary>
     /// <param name="state">The new state.</param>
     /// <param name="available">The newer version waiting to be installed, if any.</param>
-    private void SetState(UpdateState state, AvailableUpdate? available)
+    /// <param name="error">Why this state follows a failure, or null; a state that differs from the last one clears an earlier error.</param>
+    private void SetState(UpdateState state, AvailableUpdate? available, Exception? error = null)
     {
+        if (error is not null)
+        {
+            LastError = error;
+        }
+        else if (state != State)
+        {
+            LastError = null;
+        }
+
         State = state;
         _leftoversWanted = state == UpdateState.UpToDate;
         Available = available;
         Present(() => Changed?.Invoke(this, EventArgs.Empty));
     }
+
+    /// <summary>
+    /// A progress value kept as one object.
+    /// </summary>
+    /// <param name="Value">The progress.</param>
+    private sealed record ProgressBox(DownloadProgress Value);
 }
