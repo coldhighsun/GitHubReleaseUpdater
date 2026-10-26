@@ -171,4 +171,36 @@ public sealed class JsonFileLastCheckStoreTests : IDisposable
     {
         Assert.Throws<ArgumentException>(() => new JsonFileLastCheckStore(" "));
     }
+
+    /// <summary>
+    /// A pending update survives a restart and makes the store report no check, so the next one is not throttled.
+    /// </summary>
+    [Fact]
+    public async Task Pending_update_is_persisted_and_hides_the_check_time()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetLastCheckedAtAsync(DateTimeOffset.UnixEpoch, TestContext.Current.CancellationToken);
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+
+        var reopened = new JsonFileLastCheckStore(StatePath);
+        Assert.Null(await reopened.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+
+        await reopened.SetUpdatePendingAsync(false, TestContext.Current.CancellationToken);
+        Assert.Equal(DateTimeOffset.UnixEpoch, await reopened.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// Setting the pending flag to the value it already has does not rewrite the file.
+    /// </summary>
+    [Fact]
+    public async Task Unchanged_pending_flag_does_not_rewrite_the_file()
+    {
+        var store = new JsonFileLastCheckStore(StatePath);
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(StatePath, DateTime.UnixEpoch);
+
+        await store.SetUpdatePendingAsync(true, TestContext.Current.CancellationToken);
+
+        Assert.Equal(DateTime.UnixEpoch, File.GetLastWriteTimeUtc(StatePath));
+    }
 }

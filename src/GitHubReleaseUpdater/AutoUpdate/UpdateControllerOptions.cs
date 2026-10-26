@@ -58,4 +58,45 @@ public sealed class UpdateControllerOptions
     /// check in the last-check store. The controller carries on after each of them. Null ignores them.
     /// </summary>
     public Action<Exception>? OnError { get; init; }
+
+    /// <summary>
+    /// Runs just before the installer is started, for example to save what is still waiting to be saved: an installer
+    /// usually ends the application without its own shutdown. A failure of it (reported to <see cref="OnError"/>) or
+    /// exceeding <see cref="BeforeInstallTimeout"/> does not stop the installation. Null does nothing.
+    /// </summary>
+    public Func<CancellationToken, Task>? BeforeInstallAsync { get; init; }
+
+    /// <summary>
+    /// How long <see cref="BeforeInstallAsync"/> is given. Defaults to 10 seconds.
+    /// </summary>
+    public TimeSpan BeforeInstallTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// When true, <see cref="UpdateController.InstallAsync"/> stays in <see cref="UpdateState.Installing"/> until the
+    /// installer process has ended and <see cref="InstallerGracePeriod"/> has passed. If the application is still running
+    /// by then, the installer did not replace it (the user cancelled, or it failed), the state goes back to
+    /// <see cref="UpdateState.Downloaded"/> and <see cref="IUpdatePresenter.InstallerEnded"/> is called. When false (the
+    /// default), the call returns as soon as the installer is started.
+    /// </summary>
+    public bool WatchInstaller { get; init; }
+
+    /// <summary>
+    /// How long to wait after the installer process ended before concluding that it did not replace the application,
+    /// since an installer may hand over to an elevated copy of itself and end first. Defaults to 30 seconds. An
+    /// installer that cannot be watched is given ten times as long.
+    /// </summary>
+    public TimeSpan InstallerGracePeriod { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// When true, files of earlier downloads are deleted from <see cref="DownloadDirectory"/> before a new download
+    /// (except the partial file of the package about to be fetched, which lets an interrupted download go on) and when a
+    /// check finds the application up to date. A file that cannot be deleted, such as an installer still finishing,
+    /// stays for the next time. Only enable this for a directory used for nothing else. Default false.
+    /// </summary>
+    public bool CleanDownloadDirectory { get; init; }
+
+    /// <summary>
+    /// Waits for a process to end; replaceable so that tests need no real process. Defaults to watching the process.
+    /// </summary>
+    internal Func<int, CancellationToken, Task>? WaitForProcessExitAsync { get; init; }
 }

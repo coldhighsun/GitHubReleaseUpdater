@@ -79,6 +79,20 @@ public sealed class GitHubAsset
         get; init;
     }
 
+    /// <summary>
+    /// Tells whether another asset is the same upload: a maintainer who replaces the file of a release gives it a new id,
+    /// size, digest or creation time. Add every new field that identifies the content here.
+    /// </summary>
+    /// <param name="other">The asset to compare with; null is never the same.</param>
+    /// <returns>True if both describe the same uploaded file.</returns>
+    internal bool IsSameUpload(GitHubAsset? other) =>
+        other is not null
+        && Id == other.Id
+        && Name == other.Name
+        && Size == other.Size
+        && Digest == other.Digest
+        && CreatedAt == other.CreatedAt;
+
     /// <inheritdoc />
     public override string ToString() => Name;
 }

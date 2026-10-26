@@ -2,6 +2,7 @@ using GitHubReleaseUpdater.Assets;
 using GitHubReleaseUpdater.AutoUpdate;
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
+using GitHubReleaseUpdater.GitHub.Models;
 using GitHubReleaseUpdater.Installation;
 using GitHubReleaseUpdater.LastCheck;
 using GitHubReleaseUpdater.Verification;
@@ -344,7 +345,7 @@ public sealed class UpdateControllerTests : IDisposable
 
         Assert.Same(_launcher.Failure, Assert.Single(_presenter.InstallFailures));
         Assert.Equal(0, _presenter.InstallerStartedCount);
-        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
     }
 
     /// <summary>
@@ -361,7 +362,399 @@ public sealed class UpdateControllerTests : IDisposable
 
         Assert.Empty(_presenter.InstallFailures);
         Assert.Equal(0, _presenter.InstallerStartedCount);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+    }
+
+    /// <summary>
+    /// A download made ahead of the installation is not made again.
+    /// </summary>
+    [Fact]
+    public async Task Downloaded_installer_is_started_without_downloading_again()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.True(File.Exists(controller.DownloadedFile));
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Single(_launcher.Launched);
         Assert.Equal(UpdateState.Available, controller.State);
+    }
+
+    /// <summary>
+    /// A check that finds the same version again keeps the downloaded installer.
+    /// </summary>
+    [Fact]
+    public async Task Recheck_of_the_same_version_stays_downloaded()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+    }
+
+    /// <summary>
+    /// The application gets ready before the installer starts, and a failure of that does not stop the installation.
+    /// </summary>
+    [Fact]
+    public async Task Before_install_runs_first_and_its_failure_does_not_stop_the_installation()
+    {
+        var order = new List<string>();
+        var controller = Create(beforeInstall: _ =>
+        {
+            order.Add(_launcher.Launched.Count == 0 ? "before" : "late");
+            throw new IOException("cannot save");
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(["before"], order);
+        Assert.Single(_launcher.Launched);
+        Assert.Contains(_errors, e => e is IOException);
+    }
+
+    /// <summary>
+    /// A watched installer that ends while the application runs offers the downloaded installer again.
+    /// </summary>
+    [Fact]
+    public async Task Watched_installer_that_ends_returns_to_downloaded()
+    {
+        _launcher.ProcessId = 42;
+        var controller = Create(watchInstaller: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.Equal(1, _presenter.InstallerEndedCount);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Equal(2, _launcher.Launched.Count);
+    }
+
+    /// <summary>
+    /// Files of earlier downloads are deleted before a new download when that is enabled, and kept otherwise.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Old_download_files_are_deleted_only_when_enabled(bool clean)
+    {
+        Directory.CreateDirectory(_directory);
+        var stray = Path.Combine(_directory, "old-setup.exe");
+        await File.WriteAllBytesAsync(stray, [1], TestContext.Current.CancellationToken);
+        var controller = Create(cleanDirectory: clean);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(!clean, File.Exists(stray));
+    }
+
+    /// <summary>
+    /// While a newer release is pending, a store that can remember it reports no check, so the next one is not throttled.
+    /// </summary>
+    [Fact]
+    public async Task Pending_update_is_recorded_in_the_store()
+    {
+        var controller = Create(throttle: true);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Null(await _store.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// Extra arguments are appended to the preset's, and the original is untouched.
+    /// </summary>
+    [Fact]
+    public void With_arguments_appends_to_a_preset()
+    {
+        var options = InstallerLaunchOptions.InnoSetupSilent.WithArguments("/RELAUNCH=1");
+
+        Assert.Equal("/SILENT /SP- /NORESTART /RELAUNCH=1", options.Arguments);
+        Assert.Equal("/SILENT /SP- /NORESTART", InstallerLaunchOptions.InnoSetupSilent.Arguments);
+    }
+
+    /// <summary>
+    /// Once the installer was started, the downloaded file is no longer offered, so later checks stay at Available.
+    /// </summary>
+    [Fact]
+    public async Task Started_installer_leaves_no_download_behind()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+    }
+
+    /// <summary>
+    /// Waits that are negative or too long are refused when the controller is created.
+    /// </summary>
+    [Theory]
+    [InlineData(-1, 10)]
+    [InlineData(30, -5)]
+    [InlineData(3600 * 24 * 10, 10)]
+    [InlineData(30, 3600 * 24 * 60)]
+    public void Negative_waits_are_refused(int graceSeconds, int timeoutSeconds)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(
+            gracePeriod: TimeSpan.FromSeconds(graceSeconds),
+            beforeInstallTimeout: TimeSpan.FromSeconds(timeoutSeconds)));
+    }
+
+    /// <summary>
+    /// A download whose asset was replaced on the release is not reused.
+    /// </summary>
+    [Fact]
+    public async Task Replaced_asset_is_downloaded_again()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        _client.Latest = new GitHubRelease
+        {
+            Id = 1,
+            TagName = "v2.0.0",
+            Assets = [new GitHubAsset { Id = 99, Name = Installer, Size = 10, BrowserDownloadUrl = "https://github.com/o/r/releases/download/v2.0.0/" + Installer }],
+        };
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+    }
+
+    /// <summary>
+    /// A downloaded version can be skipped, which forgets the download.
+    /// </summary>
+    [Fact]
+    public async Task Downloaded_version_can_be_skipped()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        var skipped = await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(skipped);
+        Assert.Equal(UpdateState.UpToDate, controller.State);
+        Assert.Null(controller.DownloadedFile);
+    }
+
+    /// <summary>
+    /// A preparation that never ends delays the installer only until its timeout.
+    /// </summary>
+    [Fact]
+    public async Task Before_install_that_hangs_is_given_up_after_its_timeout()
+    {
+        var controller = Create(beforeInstall: _ => new TaskCompletionSource().Task);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.Single(_launcher.Launched);
+        Assert.Contains(_errors, e => e is TimeoutException);
+    }
+
+    /// <summary>
+    /// An installer without a process to watch is given the longer grace period and then offered again.
+    /// </summary>
+    [Fact]
+    public async Task Watched_installer_without_a_process_is_offered_again()
+    {
+        var controller = Create(watchInstaller: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.Equal(1, _presenter.InstallerEndedCount);
+    }
+
+    /// <summary>
+    /// Cancelling while the installer is watched ends the wait and leaves the controller usable.
+    /// </summary>
+    [Fact]
+    public async Task Cancelling_while_the_installer_is_watched_ends_the_wait()
+    {
+        _launcher.ProcessId = 42;
+        using var cts = new CancellationTokenSource();
+        var controller = Create(watchInstaller: true, waitForExit: _ => new TaskCompletionSource().Task);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(cts.Token);
+        await WaitUntilAsync(() => _launcher.Launched.Count == 1);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => install);
+        Assert.NotEqual(UpdateState.Installing, controller.State);
+        Assert.Equal(0, _presenter.InstallerEndedCount);
+    }
+
+    /// <summary>
+    /// With cleaning enabled, a check that finds the application up to date deletes what earlier downloads left.
+    /// </summary>
+    [Fact]
+    public async Task Up_to_date_check_deletes_leftovers_when_enabled()
+    {
+        PublishRelease("v1.0.0");
+        Directory.CreateDirectory(_directory);
+        var stray = Path.Combine(_directory, "old-setup.exe");
+        await File.WriteAllBytesAsync(stray, [1], TestContext.Current.CancellationToken);
+        var controller = Create(cleanDirectory: true);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.UpToDate, controller.State);
+        Assert.False(File.Exists(stray));
+    }
+
+    /// <summary>
+    /// A download whose asset changed in any identifying field is not reused.
+    /// </summary>
+    [Theory]
+    [InlineData("size")]
+    [InlineData("digest")]
+    [InlineData("created")]
+    public async Task Changed_asset_fields_are_downloaded_again(string field)
+    {
+        var controller = Create();
+        _client.Latest = Replaced(1, 10, null, null);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+
+        _client.Latest = field switch
+        {
+            "size" => Replaced(1, 11, null, null),
+            "digest" => Replaced(1, 10, "sha256:" + new string('a', 64), null),
+            _ => Replaced(1, 10, null, DateTimeOffset.UnixEpoch),
+        };
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+    }
+
+    /// <summary>
+    /// A declined elevation prompt keeps the download, so asking again does not download again.
+    /// </summary>
+    [Fact]
+    public async Task Declined_elevation_prompt_keeps_the_download_for_the_next_try()
+    {
+        _launcher.Failure = new InstallerLaunchException("cancelled", "x", isUserCancelled: true);
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+
+        _launcher.Failure = null;
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Single(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// Skipping a downloaded version deletes its installer.
+    /// </summary>
+    [Fact]
+    public async Task Skipping_a_downloaded_version_deletes_the_file()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        var file = controller.DownloadedFile!;
+
+        await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(file));
+    }
+
+    /// <summary>
+    /// Builds version 2.0.0 with an installer asset of the given identity.
+    /// </summary>
+    private static GitHubRelease Replaced(long id, long size, string? digest, DateTimeOffset? created) => new()
+    {
+        Id = 1,
+        TagName = "v2.0.0",
+        Assets = [new GitHubAsset { Id = id, Name = Installer, Size = size, Digest = digest, CreatedAt = created, BrowserDownloadUrl = "https://github.com/o/r/releases/download/v2.0.0/" + Installer }],
+    };
+
+    /// <summary>
+    /// A launch that fails for a reason that is not the file's fault keeps the verified download for another try.
+    /// </summary>
+    [Fact]
+    public async Task Failed_launch_keeps_the_download_for_the_next_try()
+    {
+        _launcher.Failure = new InstallerLaunchException("busy", "x", isUserCancelled: false);
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Single(_presenter.InstallFailures);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+
+        _launcher.Failure = null;
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _presenter.Downloading);
+        Assert.Single(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// Skipping a version clears the pending flag, so the next check is throttled again.
+    /// </summary>
+    [Fact]
+    public async Task Skipping_clears_the_pending_flag()
+    {
+        var controller = Create(throttle: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        Assert.Null(await _store.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+
+        await controller.SkipVersionAsync(TestContext.Current.CancellationToken);
+
+        Assert.NotNull(await _store.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A file where the download directory should be is not listed, and the check still completes.
+    /// </summary>
+    [Fact]
+    public async Task File_in_place_of_the_download_directory_does_not_fail_the_check()
+    {
+        PublishRelease("v1.0.0");
+        await File.WriteAllBytesAsync(_directory, [1], TestContext.Current.CancellationToken);
+        var controller = Create(cleanDirectory: true);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.UpToDate, controller.State);
+        File.Delete(_directory);
     }
 
     /// <summary>
@@ -853,7 +1246,13 @@ public sealed class UpdateControllerTests : IDisposable
         bool requireVerified = false,
         IChecksumProvider? checksums = null,
         ILastCheckStore? store = null,
-        int downloadRetries = 2)
+        int downloadRetries = 2,
+        Func<CancellationToken, Task>? beforeInstall = null,
+        bool watchInstaller = false,
+        bool cleanDirectory = false,
+        Func<int, Task>? waitForExit = null,
+        TimeSpan? gracePeriod = null,
+        TimeSpan? beforeInstallTimeout = null)
     {
         return new UpdateController(
             new ReleaseUpdater(Options(throttle, store ?? _store, checksums ?? NoChecksumProvider.Instance, downloadRetries), _client),
@@ -866,6 +1265,12 @@ public sealed class UpdateControllerTests : IDisposable
                 RequireVerifiedDownload = requireVerified,
                 OnError = _errors.Add,
                 TimeProvider = _time,
+                BeforeInstallAsync = beforeInstall,
+                WatchInstaller = watchInstaller,
+                InstallerGracePeriod = gracePeriod ?? TimeSpan.Zero,
+                BeforeInstallTimeout = beforeInstallTimeout ?? TimeSpan.FromSeconds(10),
+                CleanDownloadDirectory = cleanDirectory,
+                WaitForProcessExitAsync = waitForExit is null ? (_, _) => Task.CompletedTask : (id, token) => waitForExit(id).WaitAsync(token),
             });
     }
 
@@ -1076,6 +1481,11 @@ public sealed class UpdateControllerTests : IDisposable
         /// </summary>
         public Exception? Failure { get; set; }
 
+        /// <summary>
+        /// Gets or sets the process id the started installer reports.
+        /// </summary>
+        public int? ProcessId { get; set; }
+
         /// <inheritdoc />
         public InstallerLaunchResult Launch(string installerPath, InstallerLaunchOptions options)
         {
@@ -1085,7 +1495,7 @@ public sealed class UpdateControllerTests : IDisposable
             }
 
             Launched.Add((installerPath, options));
-            return new InstallerLaunchResult(installerPath, null);
+            return new InstallerLaunchResult(installerPath, ProcessId);
         }
     }
 
@@ -1215,6 +1625,11 @@ public sealed class UpdateControllerTests : IDisposable
         public int Downloading { get; private set; }
 
         /// <summary>
+        /// Gets how many times the application was told that the installer ended without replacing it.
+        /// </summary>
+        public int InstallerEndedCount { get; private set; }
+
+        /// <summary>
         /// Gets how many times the application was told that the installer started.
         /// </summary>
         public int InstallerStartedCount { get; private set; }
@@ -1223,6 +1638,9 @@ public sealed class UpdateControllerTests : IDisposable
         /// Gets the versions announced.
         /// </summary>
         public List<AvailableUpdate> Announced { get; } = [];
+
+        /// <inheritdoc />
+        public void InstallerEnded(AvailableUpdate update) => InstallerEndedCount++;
 
         /// <summary>
         /// Gets the errors of failed checks that were reported.
@@ -1289,5 +1707,21 @@ public sealed class UpdateControllerTests : IDisposable
 
         /// <inheritdoc />
         public void InstallerStarted(AvailableUpdate update) => InstallerStartedCount++;
+    }
+
+    /// <summary>
+    /// A process that began before the installer was started only reuses its id; one that began at or after it is the installer.
+    /// </summary>
+    [Theory]
+    [InlineData(-60, false)]
+    [InlineData(-3, false)]
+    [InlineData(-1, true)]
+    [InlineData(0, true)]
+    [InlineData(5, true)]
+    public void Process_older_than_the_launch_is_not_the_installer(int secondsAfterLaunch, bool expected)
+    {
+        var launchedAt = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(expected, UpdateController.IsInstallerProcess(launchedAt.AddSeconds(secondsAfterLaunch), launchedAt));
     }
 }

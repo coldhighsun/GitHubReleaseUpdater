@@ -81,4 +81,13 @@ public interface IUpdatePresenter
     void InstallerStarted(AvailableUpdate update)
     {
     }
+
+    /// <summary>
+    /// Tells the user that the installer ended while the application still runs, so it did not replace it. Only called
+    /// when <see cref="UpdateControllerOptions.WatchInstaller"/> is set; the version can be installed again.
+    /// </summary>
+    /// <param name="update">The release whose installer ended.</param>
+    void InstallerEnded(AvailableUpdate update)
+    {
+    }
 }

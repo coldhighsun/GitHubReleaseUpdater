@@ -34,4 +34,14 @@ public enum UpdateState
     /// A version is being downloaded and its installer started.
     /// </summary>
     Installing,
+
+    /// <summary>
+    /// The installer of the available version is being downloaded by <see cref="UpdateController.DownloadAsync"/>.
+    /// </summary>
+    Downloading,
+
+    /// <summary>
+    /// The installer was downloaded and verified and waits to be started.
+    /// </summary>
+    Downloaded,
 }

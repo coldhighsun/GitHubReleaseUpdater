@@ -10,7 +10,7 @@ namespace GitHubReleaseUpdater.LastCheck;
 /// never leaves a half-written file; a missing, unreadable or corrupt file is treated as "nothing recorded". Safe to
 /// share between threads of one process. The format is private to this library.
 /// </summary>
-public sealed partial class JsonFileLastCheckStore : ILastCheckStore
+public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUpdateStore
 {
     /// <summary>
     /// Full path of the state file.
@@ -35,7 +35,20 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore
     /// <inheritdoc />
     public async Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default)
     {
-        return (await ReadAsync(cancellationToken).ConfigureAwait(false)).LastCheckedAt;
+        var state = await ReadAsync(cancellationToken).ConfigureAwait(false);
+        return state.UpdatePending ? null : state.LastCheckedAt;
+    }
+
+    /// <inheritdoc />
+    public async Task SetUpdatePendingAsync(bool pending, CancellationToken cancellationToken = default)
+    {
+        // Checks repeat the same answer for as long as a release stays pending; the file is only written when it changes.
+        if ((await ReadAsync(cancellationToken).ConfigureAwait(false)).UpdatePending == pending)
+        {
+            return;
+        }
+
+        await UpdateAsync(state => state.UpdatePending = pending, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -167,6 +180,12 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore
         /// </summary>
         [JsonPropertyName("skippedVersion")]
         public string? SkippedVersion { get; set; }
+
+        /// <summary>
+        /// Whether the last successful check found a newer release.
+        /// </summary>
+        [JsonPropertyName("updatePending")]
+        public bool UpdatePending { get; set; }
     }
 
     /// <summary>

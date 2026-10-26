@@ -1,6 +1,9 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.Installation;
+using GitHubReleaseUpdater.LastCheck;
 using GitHubReleaseUpdater.Versioning;
 
 namespace GitHubReleaseUpdater.AutoUpdate;
@@ -72,15 +75,26 @@ public sealed class UpdateController
     private UpdateCheckResult? _lastCheck;
 
     /// <summary>
+    /// The installer downloaded and verified for <see cref="Available"/>, or null.
+    /// </summary>
+    private DownloadResult? _download;
+
+    /// <summary>
     /// The version the user was last told about by an automatic check.
     /// </summary>
     private SemanticVersion? _announced;
 
     /// <summary>
-    /// Whether an installation is asking the user or running; it stays set while the user is being asked, when
+    /// Whether a download or an installation is asking the user or running; it stays set while the user is being asked, when
     /// <see cref="State"/> does not show it yet.
     /// </summary>
     private bool _installing;
+
+    /// <summary>
+    /// Whether the up-to-date state, in which leftovers of earlier downloads are deleted, still holds. Kept apart from
+    /// <see cref="State"/> because the cleanup reads it on a thread-pool thread.
+    /// </summary>
+    private volatile bool _leftoversWanted;
 
     /// <summary>
     /// Whether the check that is running was asked for by the user.
@@ -116,6 +130,14 @@ public sealed class UpdateController
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_options.CheckInterval, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.InitialDelay, MaxDelay);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.CheckInterval, MaxDelay);
+        ArgumentOutOfRangeException.ThrowIfLessThan(_options.InstallerGracePeriod, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.InstallerGracePeriod, MaxDelay / 10);
+        if (_options.BeforeInstallTimeout != Timeout.InfiniteTimeSpan)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(_options.BeforeInstallTimeout, TimeSpan.Zero);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.BeforeInstallTimeout, MaxDelay);
+        }
+
         _time = _options.TimeProvider ?? TimeProvider.System;
         _downloadDirectory = _options.DownloadDirectory
             ?? Path.Combine(Path.GetTempPath(), "GitHubReleaseUpdater", $"{updater.Options.Owner}-{updater.Options.Repo}");
@@ -139,6 +161,16 @@ public sealed class UpdateController
     /// Gets the newer version waiting to be installed, or null if none is known.
     /// </summary>
     public AvailableUpdate? Available { get; private set; }
+
+    /// <summary>
+    /// Gets the full path of the installer once <see cref="State"/> is <see cref="UpdateState.Downloaded"/>, or null.
+    /// </summary>
+    public string? DownloadedFile => _download?.FilePath;
+
+    /// <summary>
+    /// Gets the state to rest in when nothing is running: the installer is downloaded, or only available.
+    /// </summary>
+    private UpdateState Resting => _download is null ? UpdateState.Available : UpdateState.Downloaded;
 
     /// <summary>
     /// Checks for updates by itself: once after <see cref="UpdateControllerOptions.InitialDelay"/>, then every
@@ -230,7 +262,7 @@ public sealed class UpdateController
     {
         var update = Available;
         var store = _updater.Options.LastCheckStore;
-        if (update is null || store is null || _installing || State is UpdateState.Checking or UpdateState.Installing)
+        if (update is null || store is null || _installing || State is UpdateState.Checking or UpdateState.Installing or UpdateState.Downloading)
         {
             return false;
         }
@@ -246,26 +278,81 @@ public sealed class UpdateController
         }
 
         // A check may have started or found something else while the store was written; only forget what was skipped.
-        if (ReferenceEquals(Available, update) && State == UpdateState.Available)
+        if (ReferenceEquals(Available, update) && State is UpdateState.Available or UpdateState.Downloaded)
         {
+            // One small delete, done before the state changes so that no download can start in between.
+            if (DownloadedFile is { } file)
+            {
+                TryDelete(file);
+            }
+
             _lastCheck = null;
+            _download = null;
             SetState(UpdateState.UpToDate, null);
+            await SetPendingAsync(false).ConfigureAwait(true);
         }
 
         return true;
     }
 
     /// <summary>
-    /// Asks whether to install the version that was found and, if the user agrees, downloads it and starts its
-    /// installer. Does nothing if no version was found or an installation is already running.
+    /// Downloads and verifies the installer of the version that was found, without starting it, so that
+    /// <see cref="InstallAsync"/> can start it later without downloading again. Does nothing if no version was found, it
+    /// is already downloaded, or a check, download or installation is running. A failure is reported to
+    /// <see cref="IUpdatePresenter.ReportInstallFailed"/> and leaves the state at <see cref="UpdateState.Available"/>.
     /// </summary>
     /// <param name="cancellationToken">Cancels the download.</param>
+    /// <returns>A task that completes when the download ended.</returns>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    public async Task DownloadAsync(CancellationToken cancellationToken = default)
+    {
+        var check = _lastCheck;
+        if (_installing || State != UpdateState.Available || check?.Update is not { } update)
+        {
+            return;
+        }
+
+        _installing = true;
+        try
+        {
+            SetState(UpdateState.Downloading, update);
+            Present(() => _presenter.ReportDownloading(update));
+            try
+            {
+                _download = await DownloadCoreAsync(check, update, cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                SetState(Resting, update);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                FailInstallation(update, ex);
+                return;
+            }
+
+            SetState(UpdateState.Downloaded, update);
+        }
+        finally
+        {
+            _installing = false;
+        }
+    }
+
+    /// <summary>
+    /// Asks whether to install the version that was found and, if the user agrees, downloads it (unless
+    /// <see cref="DownloadAsync"/> already did) and starts its installer. Does nothing if no version was found or a
+    /// download or installation is already running. With <see cref="UpdateControllerOptions.WatchInstaller"/> the task
+    /// completes only when the installer has ended.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the download and the wait for the installer.</param>
     /// <returns>A task that completes when the installer has been started, or the attempt was declined or failed.</returns>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public async Task InstallAsync(CancellationToken cancellationToken = default)
     {
         var check = _lastCheck;
-        if (_installing || State == UpdateState.Checking || check?.Update is not { } update)
+        if (_installing || State is UpdateState.Checking or UpdateState.Downloading || check?.Update is not { } update)
         {
             return;
         }
@@ -279,35 +366,270 @@ public sealed class UpdateController
             }
 
             SetState(UpdateState.Installing, update);
-            Present(() => _presenter.ReportDownloading(update));
-            var progress = new Progress<DownloadProgress>(value => Present(() => _presenter.ReportProgress(update, value)));
             try
             {
-                await _updater.DownloadAndLaunchInstallerAsync(check, _downloadDirectory, _launchOptions, progress, cancellationToken).ConfigureAwait(true);
+                // From here on the file is kept for another try whatever goes wrong, unless FailInstallation finds that it
+                // is not what was verified.
+                if (_download is not { } download || !File.Exists(download.FilePath))
+                {
+                    Present(() => _presenter.ReportDownloading(update));
+                    download = await DownloadCoreAsync(check, update, cancellationToken).ConfigureAwait(true);
+                    _download = download;
+                }
+
+                await PrepareAsync(cancellationToken).ConfigureAwait(true);
+                var launchedAt = DateTime.UtcNow;
+                var launched = await _updater.LaunchInstallerAsync(download, _launchOptions, cancellationToken).ConfigureAwait(true);
+                if (!_options.WatchInstaller)
+                {
+                    // The installer is on its way to replace the application; nothing is left to offer.
+                    _download = null;
+                    SetState(UpdateState.Available, update);
+                    Present(() => _presenter.InstallerStarted(update));
+                    return;
+                }
+
+                Present(() => _presenter.InstallerStarted(update));
+                await WaitForInstallerAsync(launched.ProcessId, launchedAt, cancellationToken).ConfigureAwait(true);
+                SetState(UpdateState.Downloaded, update);
+                Present(() => _presenter.InstallerEnded(update));
             }
             catch (InstallerLaunchException ex) when (ex.IsUserCancelled)
             {
-                SetState(UpdateState.Available, update);
-                return;
+                SetState(Resting, update);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                SetState(UpdateState.Available, update);
+                SetState(Resting, update);
                 throw;
             }
             catch (Exception ex)
             {
-                SetState(UpdateState.Available, update);
-                Present(() => _presenter.ReportInstallFailed(update, ex));
-                return;
+                FailInstallation(update, ex);
             }
-
-            SetState(UpdateState.Available, update);
-            Present(() => _presenter.InstallerStarted(update));
         }
         finally
         {
             _installing = false;
+        }
+    }
+
+    /// <summary>
+    /// Goes back to the resting state after a download or installation failed and tells the presenter. A downloaded file
+    /// that is not what was verified is dropped, since starting it again would fail the same way.
+    /// </summary>
+    /// <param name="update">The update that was being downloaded or installed.</param>
+    /// <param name="error">Why it failed.</param>
+    private void FailInstallation(AvailableUpdate update, Exception error)
+    {
+        if (error is UpdaterException and not InstallerLaunchException)
+        {
+            _download = null;
+        }
+
+        SetState(Resting, update);
+        Present(() => _presenter.ReportInstallFailed(update, error));
+    }
+
+    /// <summary>
+    /// Downloads the installer of an update, after clearing what earlier downloads left if that is enabled.
+    /// </summary>
+    /// <param name="check">The check that found the update.</param>
+    /// <param name="update">The update.</param>
+    /// <param name="cancellationToken">Cancels the download.</param>
+    /// <returns>The verified download.</returns>
+    private async Task<DownloadResult> DownloadCoreAsync(UpdateCheckResult check, AvailableUpdate update, CancellationToken cancellationToken)
+    {
+        _download = null;
+        if (_options.CleanDownloadDirectory)
+        {
+            await DeleteOldDownloadsAsync(update.SelectedAsset!.Name, () => true).ConfigureAwait(true);
+        }
+
+        var progress = new Progress<DownloadProgress>(value => Present(() => _presenter.ReportProgress(update, value)));
+        return await _updater.DownloadAsync(check, _downloadDirectory, progress, cancellationToken).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Lets the application get ready for being ended by the installer. A failure or a timeout is reported and ignored.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the wait.</param>
+    /// <returns>A task that completes when the application is ready or the time is up.</returns>
+    private async Task PrepareAsync(CancellationToken cancellationToken)
+    {
+        if (_options.BeforeInstallAsync is not { } prepare)
+        {
+            return;
+        }
+
+        try
+        {
+            await prepare(cancellationToken).WaitAsync(_options.BeforeInstallTimeout, _time, cancellationToken).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            ReportError(ex);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the installer to end, then for the grace period. An installer that cannot be watched, or that has no
+    /// process to watch, is given ten times the grace period instead.
+    /// </summary>
+    /// <param name="processId">The process of the installer, or null when none was started.</param>
+    /// <param name="launchedAt">When the installer was started (UTC), to tell its process from an unrelated one that got its id.</param>
+    /// <param name="cancellationToken">Cancels the wait.</param>
+    /// <returns>A task that completes when the installer is taken to have ended.</returns>
+    private async Task WaitForInstallerAsync(int? processId, DateTime launchedAt, CancellationToken cancellationToken)
+    {
+        var wait = _options.InstallerGracePeriod;
+        if (processId is null)
+        {
+            wait *= 10;
+        }
+        else
+        {
+            try
+            {
+                await (_options.WaitForProcessExitAsync ?? ((id, token) => WatchProcessAsync(id, launchedAt, token)))(processId.Value, cancellationToken).ConfigureAwait(true);
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+            {
+                // An elevated installer, for example, may not be watched from here.
+                wait *= 10;
+                ReportError(ex);
+            }
+        }
+
+        await Task.Delay(wait, _time, cancellationToken).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Tells whether a process with the installer's id can be the installer: it began no earlier than the installer was
+    /// started, give or take a little for clocks that differ in their last digits.
+    /// </summary>
+    /// <param name="startedAt">When the process began, in UTC.</param>
+    /// <param name="launchedAt">When the installer was started, in UTC.</param>
+    /// <returns>False if the process is older than the launch, so it only reuses the id.</returns>
+    internal static bool IsInstallerProcess(DateTime startedAt, DateTime launchedAt) =>
+        startedAt >= launchedAt.AddSeconds(-2);
+
+    /// <summary>
+    /// Waits for a process to end.
+    /// </summary>
+    /// <param name="processId">The process.</param>
+    /// <param name="launchedAt">When the installer was started (UTC); a process that began before that is not it.</param>
+    /// <param name="cancellationToken">Stops the wait.</param>
+    /// <returns>A task that completes when the process ended.</returns>
+    private static async Task WatchProcessAsync(int processId, DateTime launchedAt, CancellationToken cancellationToken)
+    {
+        Process process;
+        try
+        {
+            process = Process.GetProcessById(processId);
+        }
+        catch (ArgumentException)
+        {
+            // The installer is already gone.
+            return;
+        }
+
+        using (process)
+        {
+            try
+            {
+                if (!IsInstallerProcess(process.StartTime.ToUniversalTime(), launchedAt))
+                {
+                    // The installer ended and an unrelated process took its id.
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+            {
+                // The start time of an elevated process cannot be read; it is taken to be the installer.
+            }
+
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes what earlier downloads left in the download directory, off the calling thread. A file that cannot be
+    /// deleted stays. The disk work is one hop to the thread pool.
+    /// </summary>
+    /// <param name="keepName">
+    /// The file name of the package about to be downloaded, whose files are kept so that its partial file lets an
+    /// interrupted download go on; null to delete everything, as long as <paramref name="stillWanted"/> allows it.
+    /// </param>
+    /// <param name="stillWanted">Asked before each file; false stops the cleanup, for when the situation changed meanwhile.</param>
+    /// <returns>A task that completes when the files that could be deleted are deleted.</returns>
+    private async Task DeleteOldDownloadsAsync(string? keepName, Func<bool> stillWanted)
+    {
+        try
+        {
+            await Task.Run(() =>
+            {
+                if (!Directory.Exists(_downloadDirectory))
+                {
+                    return;
+                }
+
+                foreach (var file in Directory.EnumerateFiles(_downloadDirectory))
+                {
+                    if (!stillWanted())
+                    {
+                        return;
+                    }
+
+                    if (keepName is null || !Path.GetFileName(file).StartsWith(keepName, StringComparison.Ordinal))
+                    {
+                        TryDelete(file);
+                    }
+                }
+            }).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            // A chore on the side: whatever goes wrong with the directory must not fail the check or the download.
+            ReportError(ex);
+        }
+    }
+
+    /// <summary>
+    /// Deletes a file of an earlier download. A file that cannot be deleted, typically because it is still in use, stays.
+    /// </summary>
+    /// <param name="file">The file.</param>
+    private static void TryDelete(string file)
+    {
+        try
+        {
+            File.Delete(file);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Tried again next time.
+        }
+    }
+
+    /// <summary>
+    /// Records in the store, if it can, whether a newer release is waiting.
+    /// </summary>
+    /// <param name="pending">True if a newer release was found.</param>
+    /// <returns>A task that completes when it is recorded or failed.</returns>
+    private async Task SetPendingAsync(bool pending)
+    {
+        if (_updater.Options.LastCheckStore is not IPendingUpdateStore store)
+        {
+            return;
+        }
+
+        try
+        {
+            await store.SetUpdatePendingAsync(pending).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReportError(ex);
         }
     }
 
@@ -356,7 +678,15 @@ public sealed class UpdateController
         else if (check.Update is not { } update)
         {
             _lastCheck = null;
+            _download = null;
             SetState(UpdateState.UpToDate, null);
+            await SetPendingAsync(false).ConfigureAwait(true);
+            if (_options.CleanDownloadDirectory)
+            {
+                // Looked at again before each file, so that a download that starts meanwhile keeps its files.
+                await DeleteOldDownloadsAsync(null, () => _leftoversWanted).ConfigureAwait(true);
+            }
+
             if (manual)
             {
                 Present(_presenter.ReportUpToDate);
@@ -368,8 +698,15 @@ public sealed class UpdateController
         }
         else
         {
+            // An installer that was downloaded for this very version stays downloaded.
+            if (_download is not { } kept || !File.Exists(kept.FilePath) || !kept.Asset.IsSameUpload(update.SelectedAsset))
+            {
+                _download = null;
+            }
+
             _lastCheck = check;
-            SetState(UpdateState.Available, update);
+            SetState(Resting, update);
+            await SetPendingAsync(true).ConfigureAwait(true);
             if (manual)
             {
                 // The user is asked right away, so a later automatic check need not announce this version again.
@@ -391,7 +728,7 @@ public sealed class UpdateController
     /// <param name="manual">True if the user asked for the check and is told.</param>
     private void Fail(Exception? error, bool manual)
     {
-        SetState(Available is null ? UpdateState.Failed : UpdateState.Available, Available);
+        SetState(Available is null ? UpdateState.Failed : Resting, Available);
         if (manual)
         {
             Present(() => _presenter.ReportCheckFailed(error));
@@ -474,6 +811,7 @@ public sealed class UpdateController
     private void SetState(UpdateState state, AvailableUpdate? available)
     {
         State = state;
+        _leftoversWanted = state == UpdateState.UpToDate;
         Available = available;
         Present(() => Changed?.Invoke(this, EventArgs.Empty));
     }

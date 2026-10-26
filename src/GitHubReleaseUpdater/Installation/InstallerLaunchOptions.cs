@@ -31,4 +31,21 @@ public sealed class InstallerLaunchOptions
     /// Inno Setup <c>/VERYSILENT</c>: no wizard pages and no progress window. Does not ask for a restart.
     /// </summary>
     public static InstallerLaunchOptions InnoSetupVerySilent { get; } = new() { Arguments = "/VERYSILENT /SP- /NORESTART" };
+
+    /// <summary>
+    /// Returns a copy of these options with extra arguments appended, for example the installer's own switches to close
+    /// and restart the application: <c>InnoSetupSilent.WithArguments("/CLOSEAPPLICATIONS /RELAUNCH=1")</c>.
+    /// </summary>
+    /// <param name="extraArguments">The arguments to append, separated from the existing ones by a space.</param>
+    /// <returns>The new options; this instance is not changed.</returns>
+    public InstallerLaunchOptions WithArguments(string extraArguments)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(extraArguments);
+        return new InstallerLaunchOptions
+        {
+            Arguments = string.IsNullOrWhiteSpace(Arguments) ? extraArguments : Arguments + " " + extraArguments,
+            WorkingDirectory = WorkingDirectory,
+            RequireVerified = RequireVerified,
+        };
+    }
 }

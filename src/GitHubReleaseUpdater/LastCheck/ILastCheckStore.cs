@@ -40,18 +40,42 @@ public interface ILastCheckStore
 }
 
 /// <summary>
+/// Optional addition to <see cref="ILastCheckStore"/>: remembers whether the last successful check found a newer
+/// release. While one is pending, <see cref="ILastCheckStore.GetLastCheckedAtAsync"/> reports no check, so the next
+/// check is not throttled and the announcement comes back after a restart. <see cref="AutoUpdate.UpdateController"/>
+/// sets it when its store implements it.
+/// </summary>
+public interface IPendingUpdateStore
+{
+    /// <summary>
+    /// Records whether a newer release was found by the last successful check.
+    /// </summary>
+    /// <param name="pending">True if a newer release is waiting.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    Task SetUpdatePendingAsync(bool pending, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// A process-lifetime <see cref="ILastCheckStore"/> backed by plain fields. Useful for tests or short-lived
 /// tools; applications that need the state to survive a restart should implement <see cref="ILastCheckStore"/>
 /// over their own settings storage instead.
 /// </summary>
-public sealed class InMemoryLastCheckStore : ILastCheckStore
+public sealed class InMemoryLastCheckStore : ILastCheckStore, IPendingUpdateStore
 {
+    private bool _pending;
     private DateTimeOffset? _lastCheckedAt;
     private SemanticVersion? _skippedVersion;
 
     /// <inheritdoc />
     public Task<DateTimeOffset?> GetLastCheckedAtAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(_lastCheckedAt);
+        => Task.FromResult(_pending ? null : _lastCheckedAt);
+
+    /// <inheritdoc />
+    public Task SetUpdatePendingAsync(bool pending, CancellationToken cancellationToken = default)
+    {
+        _pending = pending;
+        return Task.CompletedTask;
+    }
 
     /// <inheritdoc />
     public Task<SemanticVersion?> GetSkippedVersionAsync(CancellationToken cancellationToken = default)
