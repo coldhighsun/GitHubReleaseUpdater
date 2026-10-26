@@ -16,7 +16,7 @@ public enum UpdateState
     Checking,
 
     /// <summary>
-    /// The last check found nothing newer.
+    /// The last check found nothing newer, or only a version the user chose to skip.
     /// </summary>
     UpToDate,
 

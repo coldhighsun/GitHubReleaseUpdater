@@ -26,7 +26,8 @@ public sealed class UpdateControllerOptions
 
     /// <summary>
     /// The directory the installer is downloaded to. Defaults to a folder named after the repository under the system
-    /// temporary directory.
+    /// temporary directory, which on some systems is shared with other users; set this to a folder only the current user
+    /// can write to if that matters. The installer is left there after it was started, since it may still be running.
     /// </summary>
     public string? DownloadDirectory { get; init; }
 

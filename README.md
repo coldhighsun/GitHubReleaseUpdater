@@ -112,7 +112,7 @@ if (check.Throttled)
 
 ### Automatic update flow (`GitHubReleaseUpdater.AutoUpdate` namespace)
 
-`UpdateController` is a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default. It lives in this package, in the `GitHubReleaseUpdater.AutoUpdate` namespace, and works in desktop, tray, console and service applications alike.
+`UpdateController` is a UI-agnostic state machine for the usual update flow: check in the background (first after 30 s, then every 24 h), announce a found version once, ask before installing, download, start the installer. You implement `IUpdatePresenter` (tray balloon, message box, closing the app, …); every member has a do-nothing default (`ConfirmInstallAsync` answers no, so nothing is installed until you ask the user). It lives in this package, in the `GitHubReleaseUpdater.AutoUpdate` namespace, and works in desktop, tray, console and service applications alike.
 
 ```csharp
 var updater = new ReleaseUpdater(new UpdaterOptions
@@ -133,7 +133,9 @@ await controller.InstallAsync();              // "Update to x.y.z"
 
 - **States:** `State` is `Idle`, `Checking`, `UpToDate`, `Available`, `Failed` or `Installing`; `Available` holds the version found; `Changed` fires on every change.
 - **Automatic checks** announce a version once; **manual checks** bypass throttling and the skipped version, report "up to date" / "failed" and go straight to the confirmation.
-- A manual check requested while an automatic one runs is made when that one ends; an installation that is already running makes further calls do nothing.
+- A manual check requested while an automatic one runs is made when that one ends: the call returns at once, several such requests are made as one check, and that check runs under the cancellation token of the call that was running (cancel that, for example at shutdown, and it is dropped). Since it runs inside that call, the token the manual caller passed cannot cancel it or its download, the presenter is called on the running call's context, and `RunAsync` waits for it (including a confirmation left open) before its next round. An installation that is already running makes further calls do nothing.
+- `SkipVersionAsync()` records the version found as skipped in the updater's `LastCheckStore` (automatic checks then stay quiet about it; a manual check still offers it; `State` becomes `UpToDate`) and returns `false` if there is nothing to skip or no store.
+- The installer is downloaded to a folder under the system temporary directory (set `DownloadDirectory` to change it, for example to a per-user folder where the temporary directory is shared) and is left there after it started. `InitialDelay` and `CheckInterval` must not exceed about 49 days.
 - **Verification is required by default** (`RequireVerifiedDownload`): an installer whose checksum could not be verified (no sidecar, no sums file, no digest from GitHub) is not started and the failure goes to `ReportInstallFailed`. Set it to false only if your releases cannot be verified.
 - Exceptions thrown by your presenter, a `Changed` handler or `IsAutoCheckEnabled` never leave the controller stuck; they go to `UpdateControllerOptions.OnError`, together with a failure to record the check time.
 - Call it from one thread (normally the UI thread); `Changed` and the presenter run on the caller's context.
@@ -395,7 +397,7 @@ if (check.Throttled)
 
 ### 自动更新流程（`GitHubReleaseUpdater.AutoUpdate` 命名空间）
 
-`UpdateController` 是一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现。它就在本包里，命名空间为 `GitHubReleaseUpdater.AutoUpdate`，桌面、托盘、控制台和服务类应用都可以使用。
+`UpdateController` 是一个与 UI 无关的状态机，实现常见的更新流程——后台检查（首次 30 秒后，之后每 24 小时）、同一版本只通知一次、安装前询问、下载、启动安装程序。你来实现 `IUpdatePresenter`（托盘气泡、消息框、关闭应用等），每个成员都有什么都不做的默认实现（`ConfirmInstallAsync` 默认回答“否”，所以在你询问用户之前不会安装任何东西）。它就在本包里，命名空间为 `GitHubReleaseUpdater.AutoUpdate`，桌面、托盘、控制台和服务类应用都可以使用。
 
 ```csharp
 var updater = new ReleaseUpdater(new UpdaterOptions
@@ -416,7 +418,9 @@ await controller.InstallAsync();              // “更新到 x.y.z”
 
 - **状态：** `State` 为 `Idle`、`Checking`、`UpToDate`、`Available`、`Failed` 或 `Installing`；`Available` 是找到的版本；每次变化都会触发 `Changed`。
 - **自动检查**同一版本只通知一次；**手动检查**绕过节流和已跳过的版本，会报告“已是最新”或失败，发现新版本后直接进入确认。
-- 自动检查运行期间收到的手动检查，会在自动检查结束后立刻执行；已有安装在运行时，再次调用什么都不做。
+- 自动检查运行期间收到的手动检查，会在自动检查结束后立刻执行：调用会立即返回，多个这样的请求合并成一次检查，这次检查使用当时正在运行的那个调用的取消令牌（取消它，比如在关闭应用时，排队的检查就被放弃）。因为它运行在那个调用之内，手动调用方传入的令牌既取消不了这次检查也取消不了它的下载，展示层在正在运行的那个调用的上下文里被调用，`RunAsync` 会等它结束（包括一直不关的确认对话框）才进入下一轮。已有安装在运行时，再次调用什么都不做。
+- `SkipVersionAsync()` 把找到的版本记为“已跳过”，写入更新器的 `LastCheckStore`（之后自动检查不再提示它，手动检查仍会提供；`State` 变为 `UpToDate`）；没有可跳过的版本或没有 store 时返回 `false`。
+- 安装程序下载到系统临时目录下的文件夹（用 `DownloadDirectory` 修改，例如临时目录被多个用户共用时改成当前用户专属的目录），启动后不会删除。`InitialDelay` 和 `CheckInterval` 不能超过约 49 天。
 - **默认要求校验通过**（`RequireVerifiedDownload`）：校验和无法验证的安装程序（没有 sidecar、没有 sums 文件、GitHub 也没有给出 digest）不会被启动，失败交给 `ReportInstallFailed`。只有发布确实无法校验时才把它设为 false。
 - 展示层、`Changed` 处理器、`IsAutoCheckEnabled` 抛出的异常不会让控制器卡住，它们和记录检查时间失败一起交给 `UpdateControllerOptions.OnError`。
 - 请在同一线程（通常是 UI 线程）调用；`Changed` 和展示层运行在调用方的上下文里。

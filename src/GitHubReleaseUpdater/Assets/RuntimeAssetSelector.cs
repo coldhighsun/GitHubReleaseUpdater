@@ -31,6 +31,26 @@ public sealed class RuntimeAssetSelector : IAssetSelector
     public bool AllowUnknownPlatform { get; init; }
 
     /// <summary>
+    /// Extensions of things to install on Windows.
+    /// </summary>
+    private static readonly string[] InstallableOnWindows = [".exe", ".msi", ".msix", ".appx"];
+
+    /// <summary>
+    /// Extensions of things to install on macOS.
+    /// </summary>
+    private static readonly string[] InstallableOnMac = [".dmg", ".pkg"];
+
+    /// <summary>
+    /// Extensions of things to install on Linux.
+    /// </summary>
+    private static readonly string[] InstallableOnLinux = [".deb", ".rpm", ".appimage"];
+
+    /// <summary>
+    /// Lowercased extensions a platform-less file name may have: those of the target OS plus the preferred ones.
+    /// </summary>
+    private readonly string[] _installableExtensions;
+
+    /// <summary>
     /// Creates a selector for the current runtime.
     /// </summary>
     public RuntimeAssetSelector() : this(RuntimeInfo.Current) { }
@@ -53,6 +73,13 @@ public sealed class RuntimeAssetSelector : IAssetSelector
         _preferredExtensions = preferredExtensions
             .Select(e => (e.StartsWith('.') ? e : "." + e).ToLowerInvariant())
             .ToArray();
+        _installableExtensions = (_runtime.Os.ToLowerInvariant() switch
+        {
+            "win" => InstallableOnWindows,
+            "osx" => InstallableOnMac,
+            "linux" => InstallableOnLinux,
+            _ => [],
+        }).Concat(_preferredExtensions).ToArray();
     }
 
     /// <inheritdoc />
@@ -135,32 +162,8 @@ public sealed class RuntimeAssetSelector : IAssetSelector
     /// <returns>True if the file may be chosen as a platform-less installer.</returns>
     private bool LooksInstallable(string name)
     {
-        var lower = name.ToLowerInvariant();
-        var own = _runtime.Os.ToLowerInvariant() switch
-        {
-            "win" => InstallableOnWindows,
-            "osx" => InstallableOnMac,
-            "linux" => InstallableOnLinux,
-            _ => [],
-        };
-        return own.Any(e => lower.EndsWith(e, StringComparison.Ordinal))
-            || _preferredExtensions.Any(e => lower.EndsWith(e, StringComparison.Ordinal));
+        return _installableExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase));
     }
-
-    /// <summary>
-    /// Extensions of things to install on Windows.
-    /// </summary>
-    private static readonly string[] InstallableOnWindows = [".exe", ".msi", ".msix", ".appx"];
-
-    /// <summary>
-    /// Extensions of things to install on macOS.
-    /// </summary>
-    private static readonly string[] InstallableOnMac = [".dmg", ".pkg"];
-
-    /// <summary>
-    /// Extensions of things to install on Linux.
-    /// </summary>
-    private static readonly string[] InstallableOnLinux = [".deb", ".rpm", ".appimage"];
 
     /// <summary>
     /// True for checksum, signature and similar sidecar files. Matches only known metadata extensions and

@@ -1,6 +1,7 @@
 using GitHubReleaseUpdater.Download;
 using GitHubReleaseUpdater.Exceptions;
 using GitHubReleaseUpdater.Installation;
+using GitHubReleaseUpdater.Versioning;
 
 namespace GitHubReleaseUpdater.AutoUpdate;
 
@@ -14,8 +15,13 @@ namespace GitHubReleaseUpdater.AutoUpdate;
 /// <para>
 /// An automatic check announces a version it finds, once per version. A manual check bypasses throttling and a skipped
 /// version, reports "up to date" or a failure, and goes straight to the confirmation when it finds a version. A manual
-/// check requested while an automatic one is running is made as soon as that one ends. An installation that is already
-/// running makes further calls do nothing.
+/// check requested while an automatic one is running is made as soon as that one ends: the call returns at once, several
+/// such requests are made as one, and that check runs under the token of the call that was running, so cancelling that
+/// call (for example when the application closes) drops it. Because it runs inside that call, the token the manual
+/// caller passed cannot cancel it (nor its download), the presenter is called on the context of the running call, and
+/// <see cref="RunAsync"/> does not go on to its next round until the check and whatever the user is asked after it (a
+/// confirmation left open, a download) are done. An installation that is already running makes further calls do
+/// nothing.
 /// </para>
 /// <para>
 /// Whatever the presenter, a handler of <see cref="Changed"/> or <see cref="UpdateControllerOptions.IsAutoCheckEnabled"/>
@@ -68,7 +74,7 @@ public sealed class UpdateController
     /// <summary>
     /// The version the user was last told about by an automatic check.
     /// </summary>
-    private Versioning.SemanticVersion? _announced;
+    private SemanticVersion? _announced;
 
     /// <summary>
     /// Whether an installation is asking the user or running; it stays set while the user is being asked, when
@@ -82,9 +88,16 @@ public sealed class UpdateController
     private bool _runningManual;
 
     /// <summary>
-    /// Whether the user asked for a check while an automatic one was running, which is made when that one ends.
+    /// Whether the user asked for a check while another was running, which is made when that one ends.
     /// </summary>
     private bool _manualQueued;
+
+    /// <summary>
+    /// The longest wait <see cref="Task.Delay(TimeSpan, TimeProvider, CancellationToken)"/> accepts (a little under 49.7
+    /// days); a longer <see cref="UpdateControllerOptions.InitialDelay"/> or <see cref="UpdateControllerOptions.CheckInterval"/>
+    /// would make <see cref="RunAsync"/> fail long after the controller was created.
+    /// </summary>
+    private static readonly TimeSpan MaxDelay = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     /// <summary>
     /// Creates a controller.
@@ -101,6 +114,8 @@ public sealed class UpdateController
         _options = options ?? new UpdateControllerOptions();
         ArgumentOutOfRangeException.ThrowIfLessThan(_options.InitialDelay, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_options.CheckInterval, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.InitialDelay, MaxDelay);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.CheckInterval, MaxDelay);
         _time = _options.TimeProvider ?? TimeProvider.System;
         _downloadDirectory = _options.DownloadDirectory
             ?? Path.Combine(Path.GetTempPath(), "GitHubReleaseUpdater", $"{updater.Options.Owner}-{updater.Options.Repo}");
@@ -155,7 +170,12 @@ public sealed class UpdateController
 
     /// <summary>
     /// Looks for a newer version. Does nothing while an installation is running. A manual check requested while an
-    /// automatic one is running is made when that one ends, and the call returns at once.
+    /// automatic one is running is made when that one ends, and the call returns at once: the outcome reaches the user
+    /// through the presenter only, requests made meanwhile are made as one check, and that check runs under the token of
+    /// the call that was running (so cancelling it, for example when the application closes, drops the queued check)
+    /// rather than the tokens of the callers that asked. That also means the queued check, the questions it leads to and
+    /// its download cannot be cancelled by the caller that asked, are presented on the context of the running call, and
+    /// hold up <see cref="RunAsync"/> until they are done.
     /// </summary>
     /// <param name="manual">True if the user asked for the check: throttling and a skipped version are bypassed, the
     /// outcome is reported to the presenter and a found version is offered for installation right away.</param>
@@ -180,12 +200,59 @@ public sealed class UpdateController
         }
 
         _manualQueued = false;
-        await CheckCoreAsync(manual, cancellationToken).ConfigureAwait(true);
-        if (_manualQueued)
+        try
         {
-            _manualQueued = false;
-            await CheckCoreAsync(manual: true, cancellationToken).ConfigureAwait(true);
+            await CheckCoreAsync(manual, cancellationToken).ConfigureAwait(true);
+            if (_manualQueued)
+            {
+                _manualQueued = false;
+                await CheckCoreAsync(manual: true, cancellationToken).ConfigureAwait(true);
+            }
         }
+        finally
+        {
+            // A request queued behind a check that was cancelled or failed is dropped with it.
+            _manualQueued = false;
+        }
+    }
+
+    /// <summary>
+    /// Remembers that the user does not want the version that was found, so that no check but a manual one offers it
+    /// again, and forgets it here: <see cref="State"/> becomes <see cref="UpdateState.UpToDate"/>, as it does after any
+    /// check that finds only a skipped version. Does nothing if no version was found, a check or an installation is running, or the
+    /// updater has no <see cref="UpdaterOptions.LastCheckStore"/> to remember it in.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the write to the store.</param>
+    /// <returns>True if the version was recorded as skipped; false if there was nothing to skip or it could not be
+    /// recorded (a failing store is also reported to <see cref="UpdateControllerOptions.OnError"/>).</returns>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    public async Task<bool> SkipVersionAsync(CancellationToken cancellationToken = default)
+    {
+        var update = Available;
+        var store = _updater.Options.LastCheckStore;
+        if (update is null || store is null || _installing || State is UpdateState.Checking or UpdateState.Installing)
+        {
+            return false;
+        }
+
+        try
+        {
+            await store.SetSkippedVersionAsync(update.Version, cancellationToken).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReportError(ex);
+            return false;
+        }
+
+        // A check may have started or found something else while the store was written; only forget what was skipped.
+        if (ReferenceEquals(Available, update) && State == UpdateState.Available)
+        {
+            _lastCheck = null;
+            SetState(UpdateState.UpToDate, null);
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -223,7 +290,7 @@ public sealed class UpdateController
                 SetState(UpdateState.Available, update);
                 return;
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 SetState(UpdateState.Available, update);
                 throw;
@@ -305,6 +372,8 @@ public sealed class UpdateController
             SetState(UpdateState.Available, update);
             if (manual)
             {
+                // The user is asked right away, so a later automatic check need not announce this version again.
+                _announced = update.Version;
                 await InstallAsync(cancellationToken).ConfigureAwait(true);
             }
             else if (_announced != update.Version)
