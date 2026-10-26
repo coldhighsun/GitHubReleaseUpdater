@@ -109,8 +109,11 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUp
     {
         try
         {
-            await using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
-            return await JsonSerializer.DeserializeAsync(stream, StoreJsonContext.Default.StoreState, cancellationToken).ConfigureAwait(false) ?? new StoreState();
+            return await FileRetry.RunAsync(async () =>
+            {
+                await using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
+                return await JsonSerializer.DeserializeAsync(stream, StoreJsonContext.Default.StoreState, cancellationToken).ConfigureAwait(false) ?? new StoreState();
+            }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or JsonException)
         {
@@ -144,19 +147,24 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUp
                 Directory.CreateDirectory(directory);
             }
 
-            var temp = _path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
+            var json = JsonSerializer.Serialize(state, StoreJsonContext.Default.StoreState);
+            await FileRetry.RunAsync(async () =>
             {
-                await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(state, StoreJsonContext.Default.StoreState), cancellationToken).ConfigureAwait(false);
-                File.Move(temp, _path, overwrite: true);
-            }
-            finally
-            {
-                if (File.Exists(temp))
+                var temp = _path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
                 {
-                    File.Delete(temp);
+                    await File.WriteAllTextAsync(temp, json, cancellationToken).ConfigureAwait(false);
+                    File.Move(temp, _path, overwrite: true);
+                    return true;
                 }
-            }
+                finally
+                {
+                    if (File.Exists(temp))
+                    {
+                        File.Delete(temp);
+                    }
+                }
+            }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
