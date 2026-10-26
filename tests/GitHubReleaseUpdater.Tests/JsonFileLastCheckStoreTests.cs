@@ -154,6 +154,8 @@ public sealed class JsonFileLastCheckStoreTests : IDisposable
     [Fact]
     public async Task Write_to_a_briefly_locked_file_is_retried_and_succeeds()
     {
+        // Only Windows reports a held file as a sharing violation, which is what the retry looks for.
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File sharing violations are reported by Windows only.");
         var store = new JsonFileLastCheckStore(StatePath);
         await store.SetSkippedVersionAsync(SemanticVersion.Parse("3.0.0"), TestContext.Current.CancellationToken);
         var checkedAt = new DateTimeOffset(2026, 2, 3, 4, 5, 6, TimeSpan.Zero);
