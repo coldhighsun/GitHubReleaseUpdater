@@ -101,7 +101,7 @@ if (check.Throttled)
 
 - `MinimumCheckInterval` throttles: a call inside the window returns `UpdateCheckResult.Throttled == true` without contacting GitHub. `UpdaterOptions.TimeProvider` supplies the clock (default `TimeProvider.System`), so tests can control it.
 - Failing to record the check time (`SetLastCheckedAtAsync` throws) does not discard a successful check; the next call is just not throttled, and the exception is available as `UpdateCheckResult.LastCheckStoreError` so you can log it.
-- `JsonFileLastCheckStore` is a ready-made persistent store: `LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`. Writes are atomic, and a missing or corrupt file counts as "nothing recorded".
+- `JsonFileLastCheckStore` is a ready-made persistent store: `LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`. Writes are atomic, and a missing or corrupt file counts as "nothing recorded". Reads and writes are tried again a few times when an antivirus scanner or indexer briefly holds the file.
 - `myStore.SetSkippedVersionAsync(version)` suppresses `IsUpdateAvailable`/`Update` for that version on future checks (it still shows up in `LatestVersion`, so you can still display "a newer version exists but was skipped"). Call `myStore.ClearSkippedVersionAsync()` to undo it.
 - For a user-initiated "check now" that should still surface a version the user previously skipped, call `CheckForUpdateAsync(bypassSkippedVersion: true)`. Throttling and recording the check time still happen as usual — only the skipped-version filter is bypassed for that call.
 - For a user-initiated "check now" that should ignore `MinimumCheckInterval` too, call `CheckForUpdateAsync(bypassThrottle: true)`. This lets you reuse the same `ReleaseUpdater`/`UpdaterOptions` for both throttled automatic checks and an unthrottled manual check, instead of constructing a second updater just to disable throttling.
@@ -131,7 +131,7 @@ await controller.CheckAsync(manual: true);    // "Check for updates" button: byp
 await controller.InstallAsync();              // "Update to x.y.z"
 ```
 
-- **States:** `State` is `Idle`, `Checking`, `UpToDate`, `Available`, `Failed` or `Installing`; `Available` holds the version found; `Changed` fires on every change.
+- **States:** `State` is `Idle`, `Checking`, `UpToDate`, `Available`, `Failed`, `Installing`, `Downloading` or `Downloaded`; `Available` holds the version found; `Changed` fires on every change.
 - **Automatic checks** announce a version once; **manual checks** bypass throttling and the skipped version, report "up to date" / "failed" and go straight to the confirmation.
 - A manual check requested while an automatic one runs is made when that one ends: the call returns at once, several such requests are made as one check, and that check runs under the cancellation token of the call that was running (cancel that, for example at shutdown, and it is dropped). Since it runs inside that call, the token the manual caller passed cannot cancel it or its download, the presenter is called on the running call's context, and `RunAsync` waits for it (including a confirmation left open) before its next round. An installation that is already running makes further calls do nothing.
 - `SkipVersionAsync()` records the version found as skipped in the updater's `LastCheckStore` (automatic checks then stay quiet about it; a manual check still offers it; `State` becomes `UpToDate`) and returns `false` if there is nothing to skip or no store.
@@ -142,6 +142,8 @@ await controller.InstallAsync();              // "Update to x.y.z"
 - `CleanDownloadDirectory = true` deletes earlier downloads before a new one (keeping a resumable `.partial`) and once the app is up to date. Use it only for a directory dedicated to updates.
 - A store that also implements `IPendingUpdateStore` (`JsonFileLastCheckStore` and `InMemoryLastCheckStore` do) remembers that a newer release was found, so the next check is not throttled and the announcement survives a restart.
 - `InstallerLaunchOptions.InnoSetupSilent.WithArguments("/CLOSEAPPLICATIONS /RELAUNCH=1")` appends your installer's own switches to a preset.
+- A release newer than the running version but without a package the selector accepts is kept: `State` is `Available`, `HasInstaller` is false, `Available` holds the version (and its `Release`, for notes and the page link). Nothing is announced; a manual check passes an `AssetNotFoundException` to `ReportCheckFailed`. `DownloadAsync()` and `InstallAsync()` do nothing for it.
+- `LaunchInstaller = false` is for packages that are not installers (an archive the user unpacks): `InstallAsync()` then only downloads and verifies, stops in `Downloaded`, leaves the file in `DownloadedFile` and calls `IUpdatePresenter.PackageDownloaded(update, filePath)`. `DownloadAsync()` calls it too; an installation that starts the installer does not.
 - **Verification is required by default** (`RequireVerifiedDownload`): an installer whose checksum could not be verified (no sidecar, no sums file, no digest from GitHub) is not started and the failure goes to `ReportInstallFailed`. Set it to false only if your releases cannot be verified.
 - Exceptions thrown by your presenter, a `Changed` handler or `IsAutoCheckEnabled` never leave the controller stuck; they go to `UpdateControllerOptions.OnError`, together with a failure to record the check time.
 - Call it from one thread (normally the UI thread); `Changed` and the presenter run on the caller's context.
@@ -392,7 +394,7 @@ if (check.Throttled)
 
 - `MinimumCheckInterval` 用于节流：在时间窗口内的调用会直接返回 `UpdateCheckResult.Throttled == true`，不会请求 GitHub。`UpdaterOptions.TimeProvider` 提供时钟（默认 `TimeProvider.System`），方便测试控制时间。
 - 记录检查时间失败（`SetLastCheckedAtAsync` 抛异常）不会丢弃已成功的检查结果，只是下一次调用不会被节流；异常可从 `UpdateCheckResult.LastCheckStoreError` 取得，方便记录日志。
-- `JsonFileLastCheckStore` 是现成的持久化实现：`LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`。写入是原子的，文件缺失或损坏时按"没有记录"处理。
+- `JsonFileLastCheckStore` 是现成的持久化实现：`LastCheckStore = new JsonFileLastCheckStore(Path.Combine(dataDir, "update-state.json"))`。写入是原子的，文件缺失或损坏时按"没有记录"处理。杀毒软件或索引程序短暂占用文件时，读写会自动重试几次。
 - 调用 `myStore.SetSkippedVersionAsync(version)` 可以让该版本在之后的检查中不再触发 `IsUpdateAvailable`/`Update`（但仍会出现在 `LatestVersion` 里，所以你依然可以提示"有新版本但已被跳过"）。调用 `myStore.ClearSkippedVersionAsync()` 可以撤销这个跳过。
 - 如果是用户主动点击的"立即检查"，希望仍然能看到之前被跳过的版本，可以调用 `CheckForUpdateAsync(bypassSkippedVersion: true)`：节流判断和检查时间的记录照常进行，只是这一次跳过版本过滤不生效。
 - 如果用户主动点击的"立即检查"还希望绕过 `MinimumCheckInterval` 节流，可以调用 `CheckForUpdateAsync(bypassThrottle: true)`。这样自动检查（要节流）和手动检查（不要节流）可以共用同一个 `ReleaseUpdater`/`UpdaterOptions` 实例，不必为了关闭节流单独再构造一个 updater。
@@ -422,11 +424,19 @@ await controller.CheckAsync(manual: true);    // “检查更新”按钮：绕�
 await controller.InstallAsync();              // “更新到 x.y.z”
 ```
 
-- **状态：** `State` 为 `Idle`、`Checking`、`UpToDate`、`Available`、`Failed` 或 `Installing`；`Available` 是找到的版本；每次变化都会触发 `Changed`。
+- **状态：** `State` 为 `Idle`、`Checking`、`UpToDate`、`Available`、`Failed`、`Installing`、`Downloading` 或 `Downloaded`；`Available` 是找到的版本；每次变化都会触发 `Changed`。
 - **自动检查**同一版本只通知一次；**手动检查**绕过节流和已跳过的版本，会报告“已是最新”或失败，发现新版本后直接进入确认。
 - 自动检查运行期间收到的手动检查，会在自动检查结束后立刻执行：调用会立即返回，多个这样的请求合并成一次检查，这次检查使用当时正在运行的那个调用的取消令牌（取消它，比如在关闭应用时，排队的检查就被放弃）。因为它运行在那个调用之内，手动调用方传入的令牌既取消不了这次检查也取消不了它的下载，展示层在正在运行的那个调用的上下文里被调用，`RunAsync` 会等它结束（包括一直不关的确认对话框）才进入下一轮。已有安装在运行时，再次调用什么都不做。
 - `SkipVersionAsync()` 把找到的版本记为“已跳过”，写入更新器的 `LastCheckStore`（之后自动检查不再提示它，手动检查仍会提供；`State` 变为 `UpToDate`）；没有可跳过的版本或没有 store 时返回 `false`。
 - 安装程序下载到系统临时目录下的文件夹（用 `DownloadDirectory` 修改，例如临时目录被多个用户共用时改成当前用户专属的目录），启动后不会删除。`InitialDelay` 和 `CheckInterval` 不能超过约 49 天。
+- `DownloadAsync()` 提前下载并校验安装程序（`State` 变为 `Downloaded`）；之后 `InstallAsync()` 直接启动它，不会再下载一次。
+- `BeforeInstallAsync`（配合 `BeforeInstallTimeout`，默认 10 秒）在安装程序启动前执行，例如保存状态；它失败不会阻止安装。
+- `WatchInstaller = true` 时，`InstallAsync()` 会等到安装程序进程结束（再加 `InstallerGracePeriod`，默认 30 秒）。如果应用仍在运行，状态回到 `Downloaded` 并调用 `IUpdatePresenter.InstallerEnded`，用户可以重试。
+- `CleanDownloadDirectory = true` 会在新下载前，以及确认已是最新版本时，删除之前的下载（保留可续传的 `.partial`）。只对专用于更新的目录启用。
+- 同时实现 `IPendingUpdateStore` 的存储（`JsonFileLastCheckStore` 和 `InMemoryLastCheckStore` 都实现了）会记住“已发现新版本”，下次检查不被节流，提示在重启后依然出现。
+- `InstallerLaunchOptions.InnoSetupSilent.WithArguments("/CLOSEAPPLICATIONS /RELAUNCH=1")` 可以在预设上追加安装程序自己的参数。
+- 比当前版本新、但没有选择器接受的安装包的发布会被保留：`State` 为 `Available`，`HasInstaller` 为 false，`Available` 带着该版本（含用于说明和发布页链接的 `Release`）。不会通知；手动检查会把 `AssetNotFoundException` 交给 `ReportCheckFailed`。对它调用 `DownloadAsync()` 和 `InstallAsync()` 不做任何事。
+- `LaunchInstaller = false` 用于不是安装程序的包（用户自己解压的压缩包）：`InstallAsync()` 只下载并校验，停在 `Downloaded`，文件路径在 `DownloadedFile`，并调用 `IUpdatePresenter.PackageDownloaded(update, filePath)`。`DownloadAsync()` 成功后也会调用；直接启动安装程序的安装则不会。
 - **默认要求校验通过**（`RequireVerifiedDownload`）：校验和无法验证的安装程序（没有 sidecar、没有 sums 文件、GitHub 也没有给出 digest）不会被启动，失败交给 `ReportInstallFailed`。只有发布确实无法校验时才把它设为 false。
 - 展示层、`Changed` 处理器、`IsAutoCheckEnabled` 抛出的异常不会让控制器卡住，它们和记录检查时间失败一起交给 `UpdateControllerOptions.OnError`。
 - 请在同一线程（通常是 UI 线程）调用；`Changed` 和展示层运行在调用方的上下文里。

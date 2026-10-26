@@ -99,4 +99,11 @@ public sealed class UpdateControllerOptions
     /// Waits for a process to end; replaceable so that tests need no real process. Defaults to watching the process.
     /// </summary>
     internal Func<int, CancellationToken, Task>? WaitForProcessExitAsync { get; init; }
+
+    /// <summary>
+    /// When false, <see cref="UpdateController.InstallAsync"/> only downloads and verifies the package and stops in
+    /// <see cref="UpdateState.Downloaded"/>, without starting it, for packages that are not installers, such as an archive
+    /// the user unpacks. <see cref="UpdateController.DownloadedFile"/> then names the file. Defaults to true.
+    /// </summary>
+    public bool LaunchInstaller { get; init; } = true;
 }

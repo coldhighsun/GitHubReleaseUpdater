@@ -41,7 +41,8 @@ public enum UpdateState
     Downloading,
 
     /// <summary>
-    /// The installer was downloaded and verified and waits to be started.
+    /// The package was downloaded and verified and waits to be started, or, when
+    /// <see cref="UpdateControllerOptions.LaunchInstaller"/> is off, to be used by the user (for example an archive to unpack).
     /// </summary>
     Downloaded,
 }

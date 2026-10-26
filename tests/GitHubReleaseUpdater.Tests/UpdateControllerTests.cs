@@ -154,18 +154,78 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
-    /// A newer release without an acceptable installer counts as a failed check.
+    /// A newer release without an acceptable installer stays known, and a manual check tells the user.
     /// </summary>
     [Fact]
-    public async Task Release_without_an_acceptable_installer_counts_as_a_failed_check()
+    public async Task Release_without_an_acceptable_installer_stays_known_and_is_reported_to_a_manual_check()
     {
         _client.Latest = TestData.Release("v2.0.0", "notes.txt");
         var controller = Create();
 
         await controller.CheckAsync(manual: true, TestContext.Current.CancellationToken);
 
-        Assert.Equal(UpdateState.Failed, controller.State);
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.False(controller.HasInstaller);
+        Assert.Equal(SemanticVersion.Parse("2.0.0"), controller.Available?.Version);
         Assert.IsType<AssetNotFoundException>(Assert.Single(_presenter.Failures));
+    }
+
+    /// <summary>
+    /// Without an installer an automatic check announces nothing, and downloading or installing does nothing.
+    /// </summary>
+    [Fact]
+    public async Task Release_without_an_installer_is_not_announced_and_cannot_be_installed()
+    {
+        _client.Latest = TestData.Release("v2.0.0", "notes.txt");
+        var controller = Create();
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Empty(_presenter.Announced);
+        Assert.Empty(_presenter.Failures);
+        Assert.Equal(0, _presenter.Confirmations);
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// With launching turned off, installing downloads the package and stops there, asking only once.
+    /// </summary>
+    [Fact]
+    public async Task Installing_without_launching_only_downloads()
+    {
+        var controller = Create(launchInstaller: false);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.True(File.Exists(controller.DownloadedFile));
+        Assert.Empty(_launcher.Launched);
+        Assert.Equal(1, _presenter.Confirmations);
+        Assert.Equal(0, _presenter.InstallerStartedCount);
+        Assert.Equal([controller.DownloadedFile!], _presenter.PackagesDownloaded);
+    }
+
+    /// <summary>
+    /// A download made ahead is reported as left for the user, and an installation that starts the installer is not.
+    /// </summary>
+    [Fact]
+    public async Task Package_downloaded_is_reported_for_a_download_but_not_for_a_started_installer()
+    {
+        var controller = Create();
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.DownloadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal([controller.DownloadedFile!], _presenter.PackagesDownloaded);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Single(_presenter.PackagesDownloaded);
     }
 
     /// <summary>
@@ -758,6 +818,56 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// A package that could not be verified is not offered when nothing is launched, since the user would unpack it.
+    /// </summary>
+    [Fact]
+    public async Task Unverified_package_is_refused_when_not_launching()
+    {
+        var controller = Create(launchInstaller: false, requireVerified: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.IsType<UpdaterException>(Assert.Single(_presenter.InstallFailures));
+        Assert.Equal(UpdateState.Available, controller.State);
+        Assert.Null(controller.DownloadedFile);
+        Assert.Empty(_presenter.PackagesDownloaded);
+        Assert.Empty(Directory.GetFiles(_directory));
+    }
+
+    /// <summary>
+    /// When the downloaded package was removed, installing downloads it again instead of doing nothing.
+    /// </summary>
+    [Fact]
+    public async Task Removed_package_is_downloaded_again_when_not_launching()
+    {
+        var controller = Create(launchInstaller: false);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+        File.Delete(controller.DownloadedFile!);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+        Assert.True(File.Exists(controller.DownloadedFile));
+        Assert.Equal(2, _presenter.Downloading);
+    }
+
+    /// <summary>
+    /// A release without an installer does not mark an update as pending, so later checks stay throttled.
+    /// </summary>
+    [Fact]
+    public async Task Release_without_an_installer_leaves_the_check_throttled()
+    {
+        _client.Latest = TestData.Release("v2.0.0", "notes.txt");
+        var controller = Create(throttle: true);
+
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(await _store.GetLastCheckedAtAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
     /// Installing without a found version does nothing.
     /// </summary>
     [Fact]
@@ -1252,7 +1362,8 @@ public sealed class UpdateControllerTests : IDisposable
         bool cleanDirectory = false,
         Func<int, Task>? waitForExit = null,
         TimeSpan? gracePeriod = null,
-        TimeSpan? beforeInstallTimeout = null)
+        TimeSpan? beforeInstallTimeout = null,
+        bool launchInstaller = true)
     {
         return new UpdateController(
             new ReleaseUpdater(Options(throttle, store ?? _store, checksums ?? NoChecksumProvider.Instance, downloadRetries), _client),
@@ -1270,6 +1381,7 @@ public sealed class UpdateControllerTests : IDisposable
                 InstallerGracePeriod = gracePeriod ?? TimeSpan.Zero,
                 BeforeInstallTimeout = beforeInstallTimeout ?? TimeSpan.FromSeconds(10),
                 CleanDownloadDirectory = cleanDirectory,
+                LaunchInstaller = launchInstaller,
                 WaitForProcessExitAsync = waitForExit is null ? (_, _) => Task.CompletedTask : (id, token) => waitForExit(id).WaitAsync(token),
             });
     }
@@ -1625,6 +1737,11 @@ public sealed class UpdateControllerTests : IDisposable
         public int Downloading { get; private set; }
 
         /// <summary>
+        /// Gets the files reported as downloaded and left for the user.
+        /// </summary>
+        public List<string> PackagesDownloaded { get; } = [];
+
+        /// <summary>
         /// Gets how many times the application was told that the installer ended without replacing it.
         /// </summary>
         public int InstallerEndedCount { get; private set; }
@@ -1641,6 +1758,9 @@ public sealed class UpdateControllerTests : IDisposable
 
         /// <inheritdoc />
         public void InstallerEnded(AvailableUpdate update) => InstallerEndedCount++;
+
+        /// <inheritdoc />
+        public void PackageDownloaded(AvailableUpdate update, string filePath) => PackagesDownloaded.Add(filePath);
 
         /// <summary>
         /// Gets the errors of failed checks that were reported.

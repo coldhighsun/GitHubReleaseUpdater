@@ -14,6 +14,12 @@ internal static class FileRetry
     private const int MaxAttempts = 5;
 
     /// <summary>
+    /// Attempts made in total when the failure is "access denied", which may also be a real permission problem and then
+    /// only costs one extra pause.
+    /// </summary>
+    private const int MaxAttemptsWhenDenied = 2;
+
+    /// <summary>
     /// Win32 error code for a sharing violation (the file is open in another process).
     /// </summary>
     private const int ErrorSharingViolation = 32;
@@ -44,7 +50,7 @@ internal static class FileRetry
             {
                 return await operation().ConfigureAwait(false);
             }
-            catch (Exception ex) when (attempt < MaxAttempts && IsInUse(ex))
+            catch (Exception ex) when (IsInUse(ex) && attempt < (ex is UnauthorizedAccessException ? MaxAttemptsWhenDenied : MaxAttempts))
             {
                 await Task.Delay(Delay, cancellationToken).ConfigureAwait(false);
             }

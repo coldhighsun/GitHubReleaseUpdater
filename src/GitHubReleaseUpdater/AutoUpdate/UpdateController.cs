@@ -163,9 +163,16 @@ public sealed class UpdateController
     public AvailableUpdate? Available { get; private set; }
 
     /// <summary>
-    /// Gets the full path of the installer once <see cref="State"/> is <see cref="UpdateState.Downloaded"/>, or null.
+    /// Gets the full path of the downloaded package once <see cref="State"/> is <see cref="UpdateState.Downloaded"/>, or null.
     /// </summary>
     public string? DownloadedFile => _download?.FilePath;
+
+    /// <summary>
+    /// Gets a value indicating whether the newer version found has a package (installer or archive) that can be downloaded. False while no
+    /// version is known and for a release without a package the selector accepts; <see cref="Available"/> still holds
+    /// that version, so the application can show it and point to the release page.
+    /// </summary>
+    public bool HasInstaller => Available?.SelectedAsset is not null;
 
     /// <summary>
     /// Gets the state to rest in when nothing is running: the installer is downloaded, or only available.
@@ -307,7 +314,7 @@ public sealed class UpdateController
     public async Task DownloadAsync(CancellationToken cancellationToken = default)
     {
         var check = _lastCheck;
-        if (_installing || State != UpdateState.Available || check?.Update is not { } update)
+        if (_installing || State != UpdateState.Available || check?.Update is not { SelectedAsset: not null } update)
         {
             return;
         }
@@ -317,9 +324,10 @@ public sealed class UpdateController
         {
             SetState(UpdateState.Downloading, update);
             Present(() => _presenter.ReportDownloading(update));
+            DownloadResult download;
             try
             {
-                _download = await DownloadCoreAsync(check, update, cancellationToken).ConfigureAwait(true);
+                download = await DownloadCoreAsync(check, update, cancellationToken).ConfigureAwait(true);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -332,7 +340,9 @@ public sealed class UpdateController
                 return;
             }
 
+            _download = download;
             SetState(UpdateState.Downloaded, update);
+            Present(() => _presenter.PackageDownloaded(update, download.FilePath));
         }
         finally
         {
@@ -344,7 +354,9 @@ public sealed class UpdateController
     /// Asks whether to install the version that was found and, if the user agrees, downloads it (unless
     /// <see cref="DownloadAsync"/> already did) and starts its installer. Does nothing if no version was found or a
     /// download or installation is already running. With <see cref="UpdateControllerOptions.WatchInstaller"/> the task
-    /// completes only when the installer has ended.
+    /// completes only when the installer has ended. With <see cref="UpdateControllerOptions.LaunchInstaller"/> turned off
+    /// nothing is started: the package is only downloaded and verified, the state becomes <see cref="UpdateState.Downloaded"/>
+    /// and <see cref="IUpdatePresenter.PackageDownloaded"/> is called.
     /// </summary>
     /// <param name="cancellationToken">Cancels the download and the wait for the installer.</param>
     /// <returns>A task that completes when the installer has been started, or the attempt was declined or failed.</returns>
@@ -352,7 +364,12 @@ public sealed class UpdateController
     public async Task InstallAsync(CancellationToken cancellationToken = default)
     {
         var check = _lastCheck;
-        if (_installing || State is UpdateState.Checking or UpdateState.Downloading || check?.Update is not { } update)
+        if (_installing || State is UpdateState.Checking or UpdateState.Downloading || check?.Update is not { SelectedAsset: not null } update)
+        {
+            return;
+        }
+
+        if (!_options.LaunchInstaller && State == UpdateState.Downloaded && _download is { } have && File.Exists(have.FilePath))
         {
             return;
         }
@@ -375,6 +392,13 @@ public sealed class UpdateController
                     Present(() => _presenter.ReportDownloading(update));
                     download = await DownloadCoreAsync(check, update, cancellationToken).ConfigureAwait(true);
                     _download = download;
+                }
+
+                if (!_options.LaunchInstaller)
+                {
+                    SetState(UpdateState.Downloaded, update);
+                    Present(() => _presenter.PackageDownloaded(update, download.FilePath));
+                    return;
                 }
 
                 await PrepareAsync(cancellationToken).ConfigureAwait(true);
@@ -447,7 +471,15 @@ public sealed class UpdateController
         }
 
         var progress = new Progress<DownloadProgress>(value => Present(() => _presenter.ReportProgress(update, value)));
-        return await _updater.DownloadAsync(check, _downloadDirectory, progress, cancellationToken).ConfigureAwait(true);
+        var download = await _updater.DownloadAsync(check, _downloadDirectory, progress, cancellationToken).ConfigureAwait(true);
+        if (!_options.LaunchInstaller && _options.RequireVerifiedDownload && !download.Verified)
+        {
+            // Nothing is launched, so LaunchInstallerAsync will not apply the requirement; the user would unpack the file.
+            TryDelete(download.FilePath);
+            throw new UpdaterException($"The download of '{download.Asset.Name}' was not checksum-verified and RequireVerifiedDownload is enabled, so it is not offered.");
+        }
+
+        return download;
     }
 
     /// <summary>
@@ -694,7 +726,17 @@ public sealed class UpdateController
         }
         else if (update.SelectedAsset is null)
         {
-            Fail(new AssetNotFoundException($"Release {update.Version} has no asset the selector accepts.", update.Release.Assets.Select(a => a.Name).ToArray()), manual);
+            // The version exists although nothing can be installed from it: it is kept, so that the application can show
+            // it and link to the release, but nothing is announced (so the check need not be repeated after a restart) and
+            // the user is told only when they asked.
+            _download = null;
+            _lastCheck = check;
+            SetState(UpdateState.Available, update);
+            await SetPendingAsync(false).ConfigureAwait(true);
+            if (manual)
+            {
+                Present(() => _presenter.ReportCheckFailed(new AssetNotFoundException($"Release {update.Version} has no asset the selector accepts.", update.Release.Assets.Select(a => a.Name).ToArray())));
+            }
         }
         else
         {

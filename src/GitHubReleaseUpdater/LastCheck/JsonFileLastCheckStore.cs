@@ -23,6 +23,21 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUp
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     /// <summary>
+    /// Whether a temporary file could not be deleted and may still be lying around.
+    /// </summary>
+    private volatile bool _hasLeftoverTemps;
+
+    /// <summary>
+    /// Gets or sets whether a temporary file may still be lying around, which makes the next write sweep for them;
+    /// settable so that tests can start that path without a scanner holding a file.
+    /// </summary>
+    internal bool HasLeftoverTemps
+    {
+        get => _hasLeftoverTemps;
+        set => _hasLeftoverTemps = value;
+    }
+
+    /// <summary>
     /// Creates a store over a file. The file and its directory are created on the first write.
     /// </summary>
     /// <param name="path">Path of the state file.</param>
@@ -159,9 +174,15 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUp
                 }
                 finally
                 {
-                    if (File.Exists(temp))
+                    try
                     {
                         File.Delete(temp);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        // Held by a scanner for the moment; the leftover must not hide the error that got us here. It is
+                        // swept up after a later write.
+                        _hasLeftoverTemps = true;
                     }
                 }
             }, cancellationToken).ConfigureAwait(false);
@@ -169,6 +190,61 @@ public sealed partial class JsonFileLastCheckStore : ILastCheckStore, IPendingUp
         finally
         {
             _gate.Release();
+        }
+
+        // Directory work is done outside the gate, so that it does not hold up other reads and writes.
+        if (_hasLeftoverTemps)
+        {
+            await Task.Run(() => SweepStaleTemps(TimeSpan.FromMinutes(1)), CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes temporary files of this store that earlier writes could not delete. Files younger than
+    /// <paramref name="minimumAge"/> are left alone, since a write in another process may still be using them. A file that
+    /// still cannot be deleted stays for the next sweep.
+    /// </summary>
+    /// <param name="minimumAge">How old a temporary file must be to be deleted.</param>
+    internal void SweepStaleTemps(TimeSpan minimumAge)
+    {
+        // Cleared first and raised again only for what is left, so that a leftover another write reports meanwhile keeps
+        // the flag set instead of being overwritten at the end.
+        _hasLeftoverTemps = false;
+        var directory = Path.GetDirectoryName(_path);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        {
+            return;
+        }
+
+        var remaining = false;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(directory, Path.GetFileName(_path) + ".*.tmp"))
+            {
+                try
+                {
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) < minimumAge)
+                    {
+                        remaining = true;
+                        continue;
+                    }
+
+                    File.Delete(file);
+                }
+                catch (Exception)
+                {
+                    remaining = true;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            remaining = true;
+        }
+
+        if (remaining)
+        {
+            _hasLeftoverTemps = true;
         }
     }
 
