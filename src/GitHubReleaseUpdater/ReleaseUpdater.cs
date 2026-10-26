@@ -37,6 +37,13 @@ public sealed class ReleaseUpdater : IDisposable
     private readonly AssetDownloader _downloader;
 
     /// <summary>
+    /// Downloads straight from GitHub, with the retries of the options: for what the rewriter of
+    /// <see cref="UpdaterOptions.AssetUrlRewriter"/> leaves alone and when the other address delivered something
+    /// unusable. Null when no rewriter is in use (then <see cref="_downloader"/> does it).
+    /// </summary>
+    private readonly AssetDownloader? _directDownloader;
+
+    /// <summary>
     /// Starts downloaded installers.
     /// </summary>
     private readonly IInstallerLauncher _installerLauncher;
@@ -65,7 +72,7 @@ public sealed class ReleaseUpdater : IDisposable
     /// Creates an updater that talks to GitHub with a <see cref="GitHubReleaseClient"/> built from <paramref name="options"/>.
     /// </summary>
     public ReleaseUpdater(UpdaterOptions options)
-        : this(options, new GitHubReleaseClient(options?.BaseUrl, options?.Token, options?.UserAgent, options?.HttpClient, options?.Timeout), ownsClient: true)
+        : this(options, new GitHubReleaseClient(options?.BaseUrl, options?.Token, options?.UserAgent, options?.HttpClient, options?.Timeout) { AssetUrlRewriter = options?.AssetUrlRewriter }, ownsClient: true)
     {
     }
 
@@ -99,14 +106,38 @@ public sealed class ReleaseUpdater : IDisposable
         _time = options.TimeProvider ?? TimeProvider.System;
         _checksums = options.ChecksumProvider ?? new ReleaseChecksumProvider(client);
         _installerLauncher = options.InstallerLauncher ?? new ProcessInstallerLauncher();
-        _downloader = new AssetDownloader(client)
+        _downloader = CreateDownloader(client, options, options.DownloadMaxRetryAttempts);
+        if (client is GitHubReleaseClient { AssetUrlRewriter: not null } github)
         {
-            MaxRetryAttempts = options.DownloadMaxRetryAttempts,
-            RetryDelay = options.DownloadRetryDelay,
-            AllowResume = options.DownloadAllowResume,
-            IdleTimeout = options.DownloadIdleTimeout,
-        };
+            _directDownloader = CreateDownloader(github.WithoutAssetUrlRewriter(), options, options.DownloadMaxRetryAttempts);
+        }
     }
+
+    /// <summary>
+    /// Builds a downloader over a client with the retry and resume settings of the options.
+    /// </summary>
+    /// <param name="client">The client to download with.</param>
+    /// <param name="options">The options.</param>
+    /// <param name="maxRetryAttempts">How many times a failed attempt is repeated.</param>
+    /// <returns>The downloader.</returns>
+    private static AssetDownloader CreateDownloader(IGitHubReleaseClient client, UpdaterOptions options, int maxRetryAttempts) => new(client)
+    {
+        MaxRetryAttempts = maxRetryAttempts,
+        RetryDelay = options.DownloadRetryDelay,
+        AllowResume = options.DownloadAllowResume,
+        IdleTimeout = options.DownloadIdleTimeout,
+    };
+
+    /// <summary>
+    /// Tells whether a failed download points at the place it came from (a wrong size, a failed checksum, a network
+    /// error), as opposed to this computer (a full disk, a file that cannot be written), which another source would not
+    /// help.
+    /// </summary>
+    /// <param name="exception">The exception of the download.</param>
+    /// <returns>True if downloading from another source may work.</returns>
+    private static bool IsSourceFailure(Exception exception) =>
+        exception is UpdaterException or HttpRequestException or TimeoutException or System.Net.Http.HttpIOException
+        || exception is IOException { InnerException: System.Net.Sockets.SocketException or HttpRequestException };
 
     /// <summary>
     /// The underlying GitHub client.
@@ -278,7 +309,35 @@ public sealed class ReleaseUpdater : IDisposable
 
         // The downloader verifies the bytes before moving them into place, so a mismatch never replaces an
         // existing file at the destination.
-        var (path, actual) = await _downloader.DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
+        // The other address is used only for something that can be verified: a mirror is a third party, and without an
+        // expected hash nothing would tell its bytes from the real package. The rewriter is asked once per download.
+        var mirror = expected is not null && _client is GitHubReleaseClient { AssetUrlRewriter: not null } github
+            ? github.PickAssetAddress(asset)
+            : null;
+        (string Path, string Sha256) downloaded;
+        if (mirror is not null)
+        {
+            // One attempt only: a source that does not work is given up on at once, not after its retries.
+            var viaMirror = CreateDownloader(((GitHubReleaseClient)_client).WithFixedAssetAddress(mirror), _options, maxRetryAttempts: 0);
+            try
+            {
+                downloaded = await viaMirror.DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsSourceFailure(ex))
+            {
+                // The mirror delivered something unusable: a wrong size, a failed checksum or a broken connection. What it
+                // left is thrown away, since nothing of it was verified, and the asset is downloaded from GitHub itself,
+                // with the usual retries.
+                viaMirror.DiscardPartial(asset, directory);
+                downloaded = await _directDownloader!.DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            downloaded = await (_directDownloader ?? _downloader).DownloadVerifiedAsync(asset, directory, expected, progress, cancellationToken).ConfigureAwait(false);
+        }
+
+        var (path, actual) = downloaded;
 
         return new DownloadResult(path, asset, actual, verified: expected is not null);
     }

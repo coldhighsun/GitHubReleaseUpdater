@@ -125,6 +125,12 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     }
 
     /// <summary>
+    /// Gets the function that maps the address of an asset to another one to download it from, or null. See
+    /// <see cref="UpdaterOptions.AssetUrlRewriter"/>.
+    /// </summary>
+    public Func<Uri, Uri>? AssetUrlRewriter { get; init; }
+
+    /// <summary>
     /// No-op: this instance never owns <see cref="_http"/> — a caller-supplied client is the caller's to
     /// dispose, and the default <see cref="SharedHttpClient"/> is process-wide and outlives any one instance.
     /// </summary>
@@ -171,7 +177,32 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     {
         ArgumentNullException.ThrowIfNull(asset);
         ArgumentOutOfRangeException.ThrowIfNegative(rangeStart);
-        var request = CreateAssetRequest(asset, rangeStart);
+        if (RewriteAssetUrl(asset) is { } mirror)
+        {
+            try
+            {
+                return await OpenAssetStreamAsync(asset, rangeStart, mirror, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or GitHubApiException or TimeoutException)
+            {
+                // A mirror that is down or slow must not stop the update: GitHub itself is tried next.
+            }
+        }
+
+        return await OpenAssetStreamAsync(asset, rangeStart, mirror: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Opens an asset from GitHub, or from <paramref name="mirror"/> when it is given.
+    /// </summary>
+    /// <param name="asset">The asset.</param>
+    /// <param name="rangeStart">The offset to resume at, or 0 for the whole asset.</param>
+    /// <param name="mirror">The address to download from instead of GitHub, or null.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The body of the asset.</returns>
+    private async Task<AssetStream> OpenAssetStreamAsync(GitHubAsset asset, long rangeStart, Uri? mirror, CancellationToken cancellationToken)
+    {
+        var request = CreateAssetRequest(asset, rangeStart, mirror);
         var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (IsMisalignedPartialResponse(response, rangeStart, asset.Size))
         {
@@ -412,8 +443,18 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
     /// Builds a GET request for an asset's download URL, preferring the API URL over the browser URL, with an
     /// optional <c>Range: bytes={rangeStart}-</c> header to resume a partial download.
     /// </summary>
-    private HttpRequestMessage CreateAssetRequest(GitHubAsset asset, long rangeStart = 0)
+    private HttpRequestMessage CreateAssetRequest(GitHubAsset asset, long rangeStart = 0, Uri? mirror = null)
     {
+        if (mirror is not null)
+        {
+            // Another host: it gets neither the token nor the API headers, only what any download needs.
+            var plain = new HttpRequestMessage(HttpMethod.Get, mirror);
+            plain.Headers.UserAgent.ParseAdd(_userAgent);
+            if (rangeStart > 0)
+                plain.Headers.Range = new RangeHeaderValue(rangeStart, null);
+            return plain;
+        }
+
         // Prefer the API endpoint (works for private repos with a token); fall back to the browser URL.
         var url = !string.IsNullOrEmpty(asset.ApiUrl) ? asset.ApiUrl : asset.BrowserDownloadUrl;
         if (string.IsNullOrEmpty(url))
@@ -423,6 +464,60 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient, IDisposable
         if (rangeStart > 0)
             request.Headers.Range = new RangeHeaderValue(rangeStart, null);
         return request;
+    }
+
+    /// <summary>
+    /// Asks <see cref="AssetUrlRewriter"/> once where to download an asset from.
+    /// </summary>
+    /// <param name="asset">The asset.</param>
+    /// <returns>The other address, or null if the asset is to be downloaded from GitHub.</returns>
+    /// <exception cref="UpdaterException">The rewriter returned an address that is not absolute http or https.</exception>
+    internal Uri? PickAssetAddress(GitHubAsset asset) => RewriteAssetUrl(asset);
+
+    /// <summary>
+    /// Creates a client with the same settings that downloads the packages from a fixed address, so that a decision
+    /// made once is not made again by every request of a download.
+    /// </summary>
+    /// <param name="address">The address the packages are downloaded from.</param>
+    /// <returns>The client.</returns>
+    internal GitHubReleaseClient WithFixedAssetAddress(Uri address) => new(_baseUrl, _token, _userAgent, _http, _timeout)
+    {
+        AssetUrlRewriter = _ => address,
+    };
+
+    /// <summary>
+    /// Creates a client with the same settings that always downloads from GitHub.
+    /// </summary>
+    /// <returns>The client.</returns>
+    internal GitHubReleaseClient WithoutAssetUrlRewriter() => new(_baseUrl, _token, _userAgent, _http, _timeout);
+
+    /// <summary>
+    /// Asks <see cref="AssetUrlRewriter"/> where to download an asset from. The rewriter is given the public download
+    /// address of the asset (not the API address, which needs the token).
+    /// </summary>
+    /// <param name="asset">The asset.</param>
+    /// <returns>The other address, or null if there is no rewriter, the asset has no public address, the rewriter kept the address or the rewriter threw.</returns>
+    /// <exception cref="UpdaterException">The rewriter returned an address that is not absolute http or https.</exception>
+    private Uri? RewriteAssetUrl(GitHubAsset asset)
+    {
+        if (AssetUrlRewriter is not { } rewrite || !Uri.TryCreate(asset.BrowserDownloadUrl, UriKind.Absolute, out var original))
+            return null;
+        Uri rewritten;
+        try
+        {
+            rewritten = rewrite(original);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A rewriter that fails is as good as a mirror that is down: GitHub itself is used.
+            return null;
+        }
+
+        if (rewritten is null || rewritten.Equals(original))
+            return null;
+        if (!rewritten.IsAbsoluteUri || rewritten.Scheme is not ("http" or "https"))
+            throw new UpdaterException($"The asset URL rewriter returned '{rewritten}', which is not an absolute http or https address.");
+        return rewritten;
     }
 
     /// <summary>

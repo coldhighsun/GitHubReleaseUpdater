@@ -17,6 +17,27 @@ public sealed class UpdaterOptions
     public IAssetSelector? AssetSelector { get; init; }
 
     /// <summary>
+    /// Maps the public download address of a release package to another address to fetch it from, such as a mirror
+    /// or caching proxy, for networks where GitHub's download servers are slow or blocked. It is given the address
+    /// of the asset on github.com (<c>browser_download_url</c>) and returns the address to use, or the same one to
+    /// download as usual. Only the package is fetched from there:
+    /// <list type="bullet">
+    /// <item>The token is never sent to the other address.</item>
+    /// <item>Checksum files and the release data still come from GitHub, so the checksum still protects against a
+    /// mirror that serves something else.</item>
+    /// <item>If the other address cannot be opened (a network error, a timeout or an error status), or what it delivers
+    /// is unusable (a wrong size, a failed checksum, a connection that breaks after the retries), the asset is
+    /// downloaded from GitHub itself once. A rewriter that throws counts as no other address.</item>
+    /// </list>
+    /// The function is asked once for each package that is downloaded and should give the same answer for the same address.
+    /// The other address is used only when the checksum of the package is known; without one the package comes from
+    /// GitHub, since nothing would tell a mirror's bytes from the real package.
+    /// The result must be an absolute http or https address, otherwise the download fails with
+    /// <see cref="Exceptions.UpdaterException"/>. Ignored when a custom client is passed to <see cref="ReleaseUpdater"/>.
+    /// </summary>
+    public Func<Uri, Uri>? AssetUrlRewriter { get; init; }
+
+    /// <summary>
     /// API base URL. Null uses <c>https://api.github.com/</c>. For GitHub Enterprise Server use <c>https://HOST/api/v3/</c>.
     /// </summary>
     public Uri? BaseUrl { get; init; }
