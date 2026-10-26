@@ -384,13 +384,16 @@ public sealed class ReleaseUpdater : IDisposable
     /// Starts the installer downloaded as <paramref name="download"/> and returns without waiting for it to finish.
     /// Immediately before starting it, the file on disk is hashed again and compared with the hash recorded when it
     /// was downloaded, so a file swapped or modified after verification (it usually sits in a user-writable folder
-    /// and is often started elevated) is never run.
+    /// and is often started elevated) is never run. The file is held open for reading, so that nobody can write to it, from
+    /// that check until the installer has been started. If <see cref="UpdaterOptions.InstallerVerifier"/> is set, it is asked
+    /// after the hash and before the start.
     /// </summary>
     /// <param name="download">Result of <see cref="DownloadAsync(UpdateCheckResult, string, IProgress{DownloadProgress}?, CancellationToken)"/>.</param>
     /// <param name="options">Arguments and policy for the launch; null starts the installer with no arguments.</param>
     /// <param name="cancellationToken">Cancels the re-hash; the installer is not started once cancelled.</param>
     /// <exception cref="UpdaterException"><see cref="InstallerLaunchOptions.RequireVerified"/> is set and the download was not verified.</exception>
     /// <exception cref="ChecksumMismatchException">The file no longer has the hash it had when it was downloaded.</exception>
+    /// <exception cref="InstallerVerificationException">The <see cref="UpdaterOptions.InstallerVerifier"/> refused the installer, or gave no verdict.</exception>
     /// <exception cref="InstallerLaunchException">The installer could not be read or started (including a declined UAC prompt).</exception>
     public async Task<InstallerLaunchResult> LaunchInstallerAsync(DownloadResult download, InstallerLaunchOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -402,22 +405,97 @@ public sealed class ReleaseUpdater : IDisposable
             throw new UpdaterException($"The download of '{download.Asset.Name}' was not checksum-verified and RequireVerified is enabled, so the installer was not started.");
         }
 
+        // The file is held open for reading, which keeps anyone from writing to it, from the check of its hash until the
+        // installer has been started: otherwise it could be replaced between the checks and the start.
+        FileStream? guard = null;
         string actual;
         try
         {
+            guard = new FileStream(download.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             actual = await FileHasher.Sha256Async(download.FilePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            if (guard is not null)
+            {
+                await guard.DisposeAsync().ConfigureAwait(false);
+            }
+
+            if (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new InstallerLaunchException($"The installer '{download.FilePath}' could not be read before starting it: {ex.Message}", download.FilePath, isUserCancelled: false, ex);
+            }
+
+            throw;
+        }
+
+        await using (guard.ConfigureAwait(false))
+        {
+            if (!FileHasher.HashEquals(download.Sha256, actual))
+            {
+                throw new ChecksumMismatchException(download.FilePath, download.Sha256, actual);
+            }
+
+            await RunVerifierAsync(download.FilePath, cancellationToken).ConfigureAwait(false);
+            return _installerLauncher.Launch(download.FilePath, options);
+        }
+    }
+
+    /// <summary>
+    /// Asks <see cref="UpdaterOptions.InstallerVerifier"/>, if there is one, about a downloaded installer without starting
+    /// it, so that a refusal is known right after the download and not only when the installer would be started. Starting it
+    /// with <see cref="LaunchInstallerAsync"/> asks again, since the file may have changed in between. The file is held open
+    /// for reading while the verifier looks at it.
+    /// </summary>
+    /// <param name="download">Result of <see cref="DownloadAsync(UpdateCheckResult, string, IProgress{DownloadProgress}?, CancellationToken)"/>.</param>
+    /// <param name="cancellationToken">Cancels the check.</param>
+    /// <returns>A task that completes when the installer passed, or there is no verifier.</returns>
+    /// <exception cref="InstallerVerificationException">The verifier refused the installer, or gave no verdict.</exception>
+    /// <exception cref="UpdaterException">The installer could not be read to check it.</exception>
+    public async Task VerifyDownloadAsync(DownloadResult download, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(download);
+        if (_options.InstallerVerifier is null)
+        {
+            return;
+        }
+
+        FileStream guard;
+        try
+        {
+            guard = new FileStream(download.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            throw new InstallerLaunchException($"The installer '{download.FilePath}' could not be read before starting it: {ex.Message}", download.FilePath, isUserCancelled: false, ex);
+            throw new UpdaterException($"The installer '{download.FilePath}' could not be read to check it: {ex.Message}", ex);
         }
 
-        if (!FileHasher.HashEquals(download.Sha256, actual))
+        await using (guard.ConfigureAwait(false))
         {
-            throw new ChecksumMismatchException(download.FilePath, download.Sha256, actual);
+            await RunVerifierAsync(download.FilePath, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Asks the verifier, if there is one, and turns anything but approval into an exception.
+    /// </summary>
+    /// <param name="path">The installer.</param>
+    /// <param name="cancellationToken">Cancels the check.</param>
+    /// <returns>A task that completes when the installer passed.</returns>
+    /// <exception cref="InstallerVerificationException">The verifier refused the installer, or gave no verdict.</exception>
+    private async Task RunVerifierAsync(string path, CancellationToken cancellationToken)
+    {
+        if (_options.InstallerVerifier is not { } verifier)
+        {
+            return;
         }
 
-        return _installerLauncher.Launch(download.FilePath, options);
+        var pending = verifier.VerifyAsync(path, cancellationToken);
+        var verdict = pending is null ? null : await pending.ConfigureAwait(false);
+        if (verdict is not { IsValid: true })
+        {
+            throw new InstallerVerificationException(path, verdict?.Reason ?? "The verifier refused it.");
+        }
     }
 
     /// <summary>

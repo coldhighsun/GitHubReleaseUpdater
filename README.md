@@ -104,7 +104,8 @@ await controller.CheckAsync(manual: true);    // "Check for updates" button
 await controller.InstallAsync();              // "Update to x.y.z"
 ```
 
-- **States:** `Idle`, `Checking`, `UpToDate`, `Available`, `Failed`, `Installing`, `Downloading`, `Downloaded`; `Changed` fires on every change. `LastError` and `Progress` (with `ProgressChanged`) expose the latest failure and download progress.
+- **States:** `Idle`, `Checking`, `UpToDate`, `Available`, `Failed`, `Installing`, `Downloading`, `Downloaded`; `Changed` fires on every change. `LastFailure` (`Stage`: check, download or install; `Error`; `UserInitiated`) and `Progress` (with `ProgressChanged`) expose the latest failure and download progress; `LastError` is its exception. `UserInitiated` is false for a failed automatic check, which an application usually does not show.
+- `CanDownload`, `CanInstall` and `IsBusy` say what `DownloadAsync()` / `InstallAsync()` would do now, so a UI can bind to them instead of mapping `State` itself.
 - **Manual checks** bypass throttling and the skipped version; one requested during an automatic check runs right after it. `SkipVersionAsync()` records the found version as skipped.
 - `DownloadAsync()` pre-downloads and verifies; `InstallAsync()` then starts the installer without downloading again.
 - A newer release without a matching package stays `Available` with `HasInstaller == false` — show the install entry only when `HasInstaller` is true.
@@ -170,10 +171,11 @@ await updater.LaunchInstallerAsync(file, new InstallerLaunchOptions { Arguments 
 - `InstallerLaunchOptions`: `Arguments`, `WorkingDirectory`, `RequireVerified`; presets `InnoSetupSilent` and `InnoSetupVerySilent`.
 - The installer never starts after a failed, cancelled or unverified download. The file is re-hashed right before launch, so a file modified after download is not run (`ChecksumMismatchException`).
 - Provide `UpdaterOptions.InstallerLauncher` to customize or stub out the launch.
+- **Signature check:** the checksum comes from the same release, so whoever can change the release can change both. Set `UpdaterOptions.InstallerVerifier` to check the installer just before it starts; one that is refused is not started (`InstallerVerificationException` with `Reason`). `UpdateController` asks right after the download (also when it only downloads, with `LaunchInstaller` off), so a refused package is never offered, and asks again just before the start. `AuthenticodeInstallerVerifier` checks the Authenticode signature of a Windows installer with the operating system and, with `ExpectedSubjects` (the full subject name of the signing certificate, such as `CN=Contoso Ltd, O=Contoso Ltd, L=Redmond, C=US` — the usual way to pin a publisher, since a common name alone is not unique and a thumbprint changes at every renewal), `ExpectedPublishers` (the common name only) or `ExpectedThumbprints` (SHA-1 or SHA-256), who signed it; each kind that is given must match, and without any a valid signature of anyone passes. On Windows the file is held open for reading from its hash check until the installer has started, so it cannot be replaced in between (elsewhere .NET file sharing is only advisory, so keep the download directory private). An installer the verifier refused is deleted and not downloaded again for the same asset (`IsInstallerRefused`); a manual check allows another try. Revocation is not checked online. On other systems it refuses everything (`AuthenticodeInstallerVerifier.IsSupported`), so set it only on Windows. Implement `IInstallerVerifier` for other schemes.
 
 ## Exceptions
 
-All derive from `UpdaterException`: `GitHubApiException` (`StatusCode`, `IsRateLimited`, `RateLimitResetAt`), `AssetNotFoundException` (`AvailableAssets`), `ChecksumMismatchException` (`Expected`/`Actual`), `InstallerLaunchException` (`FilePath`, `IsUserCancelled`).
+All derive from `UpdaterException`: `GitHubApiException` (`StatusCode`, `IsRateLimited`, `RateLimitResetAt`), `AssetNotFoundException` (`AvailableAssets`), `ChecksumMismatchException` (`Expected`/`Actual`), `InstallerLaunchException` (`FilePath`, `IsUserCancelled`), `InstallerVerificationException` (`FilePath`, `Reason`).
 
 `CheckForUpdateAsync()` catches everything and reports it via `Success`/`Error`; only caller cancellation throws `OperationCanceledException`. `DownloadAsync()` throws.
 

@@ -8,6 +8,15 @@ they are listed under **Changed**). Releases are tagged `vX.Y.Z`; the notes of e
 
 ### Added
 
+- `UpdateController.LastFailure` (`UpdateFailure` with `Stage`, `Error` and `UserInitiated`); `LastError` is now its exception.
+- `UpdateController.CanDownload`, `CanInstall` and `IsBusy`.
+- `ReleaseUpdater.VerifyDownloadAsync` (asks the verifier about a downloaded installer without starting it; `UpdateController` does so right after every download, also when it only downloads) and
+  `UpdaterOptions.InstallerVerifier` with `IInstallerVerifier`, `AuthenticodeInstallerVerifier` (Windows) and
+  `InstallerVerificationException`: an extra check of the installer, such as its Authenticode signature and signer, just
+  before it is started. `ExpectedSubjects` pins the full subject name of the signer; the installer is held open for
+  reading (on Windows) from its hash check until it has started, so it cannot be replaced in between. An installer the
+  verifier refused is deleted and not downloaded again for the same asset (`UpdateController.IsInstallerRefused`); a manual check
+  allows another try.
 - `UpdaterOptions.AssetUrlRewriter` (and `GitHubReleaseClient.AssetUrlRewriter`): download the package from another
   address, such as a mirror, for networks where GitHub's download servers are slow or blocked. The token is not sent
   there (only when the checksum is known), checksums still come from GitHub, and a mirror that cannot be opened or delivers something unusable
@@ -49,6 +58,8 @@ they are listed under **Changed**). Releases are tagged `vX.Y.Z`; the notes of e
 - A failed download records what had arrived as a last resume checkpoint, so a retry does not repeat the data received since
   the previous one.
 - `UpdateController` with `CleanDownloadDirectory` keeps the files of the package under the name the downloader saves it as.
+- `UpdateController.Progress` is cleared before the first `Changed` of a download, so a handler no longer sees the
+  progress of the previous download there.
 
 ### Fixed
 

@@ -4,6 +4,8 @@
     <RootNamespace>GitHubReleaseUpdater</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsAotCompatible>true</IsAotCompatible>
+    <!-- Only for the code the LibraryImport generator writes (the Authenticode check); there is no unsafe code of our own. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <PackageId>GitHubReleaseUpdater</PackageId>
     <Authors>coldhighsun</Authors>
@@ -22,7 +24,7 @@
     <!-- Packing fails when the public API breaks compatibility with the last released version. After a release, raise the
          baseline to it; an intended break needs a CompatibilitySuppressions.xml (dotnet pack -p:ApiCompatGenerateSuppressionFile=true). -->
     <EnablePackageValidation>true</EnablePackageValidation>
-    <PackageValidationBaselineVersion>0.5.0</PackageValidationBaselineVersion>
+    <PackageValidationBaselineVersion>0.6.0</PackageValidationBaselineVersion>
   </PropertyGroup>
 
   <ItemGroup>
