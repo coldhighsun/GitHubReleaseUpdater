@@ -167,6 +167,12 @@ public sealed partial class UpdateController
             ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.BeforeInstallTimeout, MaxDelay);
         }
 
+        if (_options.InstallNotStartedTimeout != Timeout.InfiniteTimeSpan)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(_options.InstallNotStartedTimeout, TimeSpan.Zero);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(_options.InstallNotStartedTimeout, MaxDelay);
+        }
+
         _time = _options.TimeProvider ?? TimeProvider.System;
         _downloadDirectory = _options.DownloadDirectory
             ?? Path.Combine(Path.GetTempPath(), "GitHubReleaseUpdater", $"{updater.Options.Owner}-{updater.Options.Repo}");
@@ -523,6 +529,7 @@ public sealed partial class UpdateController
 
             SetState(UpdateState.Installing, update);
             var stage = UpdateFailureStage.Download;
+            var needsUndo = false;
             try
             {
                 // From here on the file is kept for another try whatever goes wrong, unless FailInstallation finds that it
@@ -542,9 +549,11 @@ public sealed partial class UpdateController
                     return;
                 }
 
+                needsUndo = _options.BeforeInstallAsync is not null;
                 await PrepareAsync(cancellationToken).ConfigureAwait(true);
                 var launchedAt = DateTime.UtcNow;
                 var launched = await _updater.LaunchInstallerAsync(download, _launchOptions, cancellationToken).ConfigureAwait(true);
+                needsUndo = false;
                 if (!_options.WatchInstaller)
                 {
                     // The installer is on its way to replace the application; nothing is left to offer.
@@ -561,15 +570,19 @@ public sealed partial class UpdateController
             }
             catch (InstallerLaunchException ex) when (ex.IsUserCancelled)
             {
+                await UndoPrepareAsync(needsUndo).ConfigureAwait(true);
                 SetState(Resting, update);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                await UndoPrepareAsync(needsUndo).ConfigureAwait(true);
                 SetState(Resting, update);
                 throw;
             }
             catch (Exception ex)
             {
+                // The application is restored before the failure is shown.
+                await UndoPrepareAsync(needsUndo).ConfigureAwait(true);
                 FailInstallation(update, ex, stage);
             }
         }

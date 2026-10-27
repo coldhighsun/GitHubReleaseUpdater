@@ -110,7 +110,7 @@ await controller.InstallAsync();              // "Update to x.y.z"
 - `DownloadAsync()` pre-downloads and verifies; `InstallAsync()` then starts the installer without downloading again.
 - A newer release without a matching package stays `Available` with `HasInstaller == false` — show the install entry only when `HasInstaller` is true.
 - `LaunchInstaller = false` is for non-installer packages (e.g. an archive): the file is downloaded, verified and handed to `IUpdatePresenter.PackageDownloaded`.
-- `BeforeInstallAsync` runs just before the installer starts (e.g. to save state). `WatchInstaller = true` waits for the installer process to end.
+- `BeforeInstallAsync` runs just before the installer starts (e.g. to save state). `BeforeInstallMustSucceed = true` makes its failure stop the installation, and `InstallNotStartedAsync` undoes it when the installer then does not start (declined elevation, launch failure, cancel; limited by `InstallNotStartedTimeout`). `WatchInstaller = true` waits for the installer process to end.
 - `CleanDownloadDirectory = true` deletes earlier downloads (use a dedicated directory only); `DownloadDirectory` defaults to a folder under the system temp directory.
 - **Verification is required by default** (`RequireVerifiedDownload`): an installer whose checksum cannot be verified is not started.
 - `AskToInstallAfterManualCheck = false` makes a manual check only look; `SkipChecksWhileUpdateKnown = true` stops background rounds from asking again while an update is known.

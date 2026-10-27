@@ -9,7 +9,8 @@ namespace GitHubReleaseUpdater.AutoUpdate;
 public sealed partial class UpdateController
 {
     /// <summary>
-    /// Lets the application get ready for being ended by the installer. A failure or a timeout is reported and ignored.
+    /// Lets the application get ready for being ended by the installer. A timeout or a failure is reported and ignored,
+    /// unless <see cref="UpdateControllerOptions.BeforeInstallMustSucceed"/> is set, which rethrows it.
     /// </summary>
     /// <param name="cancellationToken">Cancels the wait.</param>
     /// <returns>A task that completes when the application is ready or the time is up.</returns>
@@ -22,11 +23,80 @@ public sealed partial class UpdateController
 
         try
         {
-            await prepare(cancellationToken).WaitAsync(_options.BeforeInstallTimeout, _time, cancellationToken).ConfigureAwait(true);
+            // Only a preparation that stops the installation is told to stop: the undo must not run beside it. Otherwise
+            // it may finish in the background, say saving state, while the installer starts.
+            await RunHookAsync(prepare, _options.BeforeInstallTimeout, cancellationToken, _options.BeforeInstallMustSucceed).ConfigureAwait(true);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
+            if (_options.BeforeInstallMustSucceed)
+            {
+                throw;
+            }
+
             ReportError(ex);
+        }
+    }
+
+    /// <summary>
+    /// Lets the application undo its preparation after the installer did not start. A failure or a timeout is reported
+    /// and ignored; the token of the callback is cancelled when <see cref="UpdateControllerOptions.InstallNotStartedTimeout"/>
+    /// is up.
+    /// </summary>
+    /// <param name="installerNotStarted">Whether the application was prepared and the installer was not started.</param>
+    /// <returns>A task that completes when the application has undone it or the time is up.</returns>
+    private async Task UndoPrepareAsync(bool installerNotStarted)
+    {
+        if (!installerNotStarted || _options.InstallNotStartedAsync is not { } undo)
+        {
+            return;
+        }
+
+        try
+        {
+            await RunHookAsync(undo, _options.InstallNotStartedTimeout, CancellationToken.None, cancelOnFailure: true).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ReportError(ex);
+        }
+    }
+
+    /// <summary>
+    /// Runs a hook of the application and stops waiting for it after the timeout.
+    /// </summary>
+    /// <param name="hook">The hook.</param>
+    /// <param name="timeout">How long to wait.</param>
+    /// <param name="cancellationToken">Cancels the hook and the wait.</param>
+    /// <param name="cancelOnFailure">Whether the token given to the hook is cancelled when the wait ends in a failure or a timeout.</param>
+    /// <returns>A task that completes when the hook has or the time is up.</returns>
+    private async Task RunHookAsync(Func<CancellationToken, Task> hook, TimeSpan timeout, CancellationToken cancellationToken, bool cancelOnFailure)
+    {
+        if (!cancelOnFailure)
+        {
+            // The hook may outlive the wait, so it gets the caller's token itself, not one that is gone by then.
+            await hook(cancellationToken).WaitAsync(timeout, _time, cancellationToken).ConfigureAwait(true);
+            return;
+        }
+
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
+        {
+            await hook(stop.Token).WaitAsync(timeout, _time, cancellationToken).ConfigureAwait(true);
+        }
+        catch
+        {
+            try
+            {
+                await stop.CancelAsync().ConfigureAwait(true);
+            }
+            catch (Exception cancelError)
+            {
+                // A handler registered on the token threw; that must not hide why the hook failed.
+                ReportError(cancelError);
+            }
+
+            throw;
         }
     }
 

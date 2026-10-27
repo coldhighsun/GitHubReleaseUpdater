@@ -110,7 +110,7 @@ await controller.InstallAsync();              // “更新到 x.y.z”
 - `DownloadAsync()` 提前下载并校验；之后 `InstallAsync()` 直接启动安装程序，不会再下载。
 - 比当前版本新、但没有匹配安装包的发布会停在 `Available`，`HasInstaller == false`——只在 `HasInstaller` 为 true 时才显示安装入口。
 - `LaunchInstaller = false` 用于非安装程序的包（如压缩包）：下载并校验后交给 `IUpdatePresenter.PackageDownloaded`。
-- `BeforeInstallAsync` 在安装程序启动前执行（如保存状态）。`WatchInstaller = true` 会等待安装程序进程结束。
+- `BeforeInstallAsync` 在安装程序启动前执行（如保存状态）。`BeforeInstallMustSucceed = true` 让它的失败中止安装，`InstallNotStartedAsync` 在安装程序随后没有启动（拒绝提权、启动失败、取消）时撤销它，用时受 `InstallNotStartedTimeout` 限制。`WatchInstaller = true` 会等待安装程序进程结束。
 - `CleanDownloadDirectory = true` 会删除之前的下载（只对专用目录启用）；`DownloadDirectory` 默认为系统临时目录下的文件夹。
 - **默认要求校验通过**（`RequireVerifiedDownload`）：无法校验的安装程序不会被启动。
 - `AskToInstallAfterManualCheck = false` 让手动检查只查找不询问；`SkipChecksWhileUpdateKnown = true` 让后台轮次在已知有新版本时不再重复检查。

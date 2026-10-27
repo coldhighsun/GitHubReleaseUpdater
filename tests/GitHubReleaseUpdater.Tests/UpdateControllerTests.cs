@@ -486,6 +486,151 @@ public sealed class UpdateControllerTests : IDisposable
     }
 
     /// <summary>
+    /// When the preparation must succeed, its failure stops the installation, which is reported, and the undo runs.
+    /// </summary>
+    [Fact]
+    public async Task Failed_required_preparation_stops_the_installation_and_is_undone()
+    {
+        var undone = 0;
+        var controller = Create(
+            beforeInstall: _ => throw new IOException("cannot reset"),
+            beforeInstallMustSucceed: true,
+            installNotStarted: _ =>
+            {
+                undone++;
+                return Task.CompletedTask;
+            });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(_launcher.Launched);
+        Assert.IsType<IOException>(Assert.Single(_presenter.InstallFailures));
+        Assert.Equal(UpdateFailureStage.Install, controller.LastFailure?.Stage);
+        Assert.Equal(1, undone);
+        Assert.Equal(UpdateState.Downloaded, controller.State);
+    }
+
+    /// <summary>
+    /// The undo runs when the installer does not start after a successful preparation, and not when it starts.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 0)]
+    public async Task Preparation_is_undone_only_when_the_installer_does_not_start(bool userDeclines, int expectedUndone)
+    {
+        var undone = 0;
+        if (userDeclines)
+        {
+            _launcher.Failure = new InstallerLaunchException("cancelled", "x", isUserCancelled: true);
+        }
+
+        var controller = Create(beforeInstall: _ => Task.CompletedTask, installNotStarted: _ =>
+        {
+            undone++;
+            return Task.CompletedTask;
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(expectedUndone, undone);
+        Assert.Equal(userDeclines ? 0 : 1, _presenter.InstallerStartedCount);
+    }
+
+    /// <summary>
+    /// A failing undo is reported and does not hide the original outcome.
+    /// </summary>
+    [Fact]
+    public async Task Failing_undo_is_reported_to_on_error()
+    {
+        _launcher.Failure = new InstallerLaunchException("cannot start", "x", isUserCancelled: false);
+        var controller = Create(beforeInstall: _ => Task.CompletedTask, installNotStarted: _ => throw new IOException("cannot restore"));
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Contains(_errors, e => e is IOException);
+        Assert.Same(_launcher.Failure, Assert.Single(_presenter.InstallFailures));
+    }
+
+    /// <summary>
+    /// A required preparation that hangs stops the installation when its timeout is up.
+    /// </summary>
+    [Fact]
+    public async Task Required_preparation_that_hangs_stops_the_installation()
+    {
+        var controller = Create(beforeInstall: _ => new TaskCompletionSource().Task, beforeInstallMustSucceed: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.Empty(_launcher.Launched);
+        Assert.IsType<TimeoutException>(Assert.Single(_presenter.InstallFailures));
+    }
+
+    /// <summary>
+    /// Cancelling the installation after the preparation undoes it.
+    /// </summary>
+    [Fact]
+    public async Task Cancelled_installation_undoes_the_preparation()
+    {
+        var undone = 0;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var controller = Create(
+            beforeInstall: async token =>
+            {
+                await cts.CancelAsync();
+                await Task.Delay(Timeout.Infinite, token);
+            },
+            installNotStarted: _ =>
+            {
+                undone++;
+                return Task.CompletedTask;
+            });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => controller.InstallAsync(cts.Token));
+
+        Assert.Equal(1, undone);
+        Assert.Empty(_launcher.Launched);
+    }
+
+    /// <summary>
+    /// An undo that hangs is cancelled after its timeout and reported, and the installation ends.
+    /// </summary>
+    [Fact]
+    public async Task Hanging_undo_is_cancelled_after_its_timeout()
+    {
+        CancellationToken seen = default;
+        _launcher.Failure = new InstallerLaunchException("cannot start", "x", isUserCancelled: false);
+        var controller = Create(beforeInstall: _ => Task.CompletedTask, installNotStarted: token =>
+        {
+            seen = token;
+            return new TaskCompletionSource().Task;
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.True(seen.IsCancellationRequested);
+        Assert.Single(_presenter.InstallFailures);
+        Assert.NotEmpty(_errors);
+    }
+
+    /// <summary>
     /// A watched installer that ends while the application runs offers the downloaded installer again.
     /// </summary>
     [Fact]
@@ -580,6 +725,175 @@ public sealed class UpdateControllerTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() => Create(
             gracePeriod: TimeSpan.FromSeconds(graceSeconds),
             beforeInstallTimeout: TimeSpan.FromSeconds(timeoutSeconds)));
+    }
+
+    /// <summary>
+    /// Without a preparation there is nothing to undo.
+    /// </summary>
+    [Fact]
+    public async Task Undo_does_not_run_without_a_preparation()
+    {
+        var undone = 0;
+        _launcher.Failure = new InstallerLaunchException("cannot start", "x", isUserCancelled: false);
+        var controller = Create(installNotStarted: _ =>
+        {
+            undone++;
+            return Task.CompletedTask;
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, undone);
+    }
+
+    /// <summary>
+    /// A preparation that timed out is told to stop before the undo runs.
+    /// </summary>
+    [Fact]
+    public async Task Timed_out_preparation_is_cancelled_before_the_undo()
+    {
+        CancellationToken prepareToken = default;
+        var stoppedBeforeUndo = false;
+        var controller = Create(
+            beforeInstall: token =>
+            {
+                prepareToken = token;
+                return new TaskCompletionSource().Task;
+            },
+            beforeInstallMustSucceed: true,
+            installNotStarted: _ =>
+            {
+                stoppedBeforeUndo = prepareToken.IsCancellationRequested;
+                return Task.CompletedTask;
+            });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.True(stoppedBeforeUndo);
+    }
+
+    /// <summary>
+    /// A preparation that is not required may finish in the background after its timeout, so it is not cancelled.
+    /// </summary>
+    [Fact]
+    public async Task Timed_out_optional_preparation_is_not_cancelled()
+    {
+        CancellationToken prepareToken = default;
+        var controller = Create(beforeInstall: token =>
+        {
+            prepareToken = token;
+            return new TaskCompletionSource().Task;
+        });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.Single(_launcher.Launched);
+        Assert.False(prepareToken.IsCancellationRequested);
+    }
+
+    /// <summary>
+    /// Cancelling the installation reaches the token given to the preparation.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cancelling_the_installation_cancels_the_preparation_token(bool mustSucceed)
+    {
+        CancellationToken prepareToken = default;
+        var started = new TaskCompletionSource();
+        var controller = Create(
+            beforeInstall: token =>
+            {
+                prepareToken = token;
+                started.SetResult();
+                return new TaskCompletionSource().Task;
+            },
+            beforeInstallMustSucceed: mustSucceed);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(cts.Token);
+        await started.Task;
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => install);
+        Assert.True(prepareToken.IsCancellationRequested);
+    }
+
+    /// <summary>
+    /// A handler on the token of the hook that throws does not hide the failure of a required preparation.
+    /// </summary>
+    [Fact]
+    public async Task Throwing_cancellation_handler_does_not_hide_the_timeout()
+    {
+        var controller = Create(
+            beforeInstall: token =>
+            {
+                token.Register(() => throw new InvalidOperationException("handler"));
+                return new TaskCompletionSource().Task;
+            },
+            beforeInstallMustSucceed: true);
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        var install = controller.InstallAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() =>
+        {
+            _time.Advance(TimeSpan.FromSeconds(11));
+            return install.IsCompleted;
+        });
+        await install;
+
+        Assert.IsType<TimeoutException>(Assert.Single(_presenter.InstallFailures));
+        var error = Assert.IsType<AggregateException>(Assert.Single(_errors));
+        Assert.IsType<InvalidOperationException>(Assert.Single(error.InnerExceptions));
+    }
+
+    /// <summary>
+    /// A negative wait for the undo is refused when the controller is created.
+    /// </summary>
+    [Fact]
+    public void Negative_undo_timeout_is_refused()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(installNotStartedTimeout: TimeSpan.FromSeconds(-5)));
+    }
+
+    /// <summary>
+    /// A refusal before the installer is started, here because the download is not verified, undoes the preparation.
+    /// </summary>
+    [Fact]
+    public async Task Refused_installer_undoes_the_preparation()
+    {
+        var undone = 0;
+        var controller = Create(
+            launchOptions: new InstallerLaunchOptions { RequireVerified = true },
+            beforeInstall: _ => Task.CompletedTask,
+            installNotStarted: _ =>
+            {
+                undone++;
+                return Task.CompletedTask;
+            });
+        await controller.CheckAsync(manual: false, TestContext.Current.CancellationToken);
+
+        await controller.InstallAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, undone);
+        Assert.Empty(_launcher.Launched);
+        Assert.Single(_presenter.InstallFailures);
     }
 
     /// <summary>
@@ -2209,11 +2523,14 @@ public sealed class UpdateControllerTests : IDisposable
         ILastCheckStore? store = null,
         int downloadRetries = 2,
         Func<CancellationToken, Task>? beforeInstall = null,
+        bool beforeInstallMustSucceed = false,
+        Func<CancellationToken, Task>? installNotStarted = null,
         bool watchInstaller = false,
         bool cleanDirectory = false,
         Func<int, Task>? waitForExit = null,
         TimeSpan? gracePeriod = null,
         TimeSpan? beforeInstallTimeout = null,
+        TimeSpan? installNotStartedTimeout = null,
         bool launchInstaller = true,
         bool askAfterManualCheck = true,
         bool skipWhileUpdateKnown = false)
@@ -2230,9 +2547,12 @@ public sealed class UpdateControllerTests : IDisposable
                 OnError = _errors.Add,
                 TimeProvider = _time,
                 BeforeInstallAsync = beforeInstall,
+                BeforeInstallMustSucceed = beforeInstallMustSucceed,
+                InstallNotStartedAsync = installNotStarted,
                 WatchInstaller = watchInstaller,
                 InstallerGracePeriod = gracePeriod ?? TimeSpan.Zero,
                 BeforeInstallTimeout = beforeInstallTimeout ?? TimeSpan.FromSeconds(10),
+                InstallNotStartedTimeout = installNotStartedTimeout ?? TimeSpan.FromSeconds(10),
                 CleanDownloadDirectory = cleanDirectory,
                 LaunchInstaller = launchInstaller,
                 AskToInstallAfterManualCheck = askAfterManualCheck,
