@@ -8,6 +8,8 @@ they are listed under **Changed**). Releases are tagged `vX.Y.Z`; the notes of e
 
 ### Added
 
+- `UpdateControllerOptions.BeforeInstallMustSucceed` (default `false`): a failure or timeout of `BeforeInstallAsync` stops the installation and is reported as a failed installation, instead of being ignored.
+- `UpdateControllerOptions.InstallNotStartedAsync`: runs when `BeforeInstallAsync` was started but the installer then did not start, so the application can undo its preparation (only when `BeforeInstallAsync` is set); `InstallNotStartedTimeout` (default 10 s) limits it.
 - `UpdateController.LastFailure` (`UpdateFailure` with `Stage`, `Error` and `UserInitiated`); `LastError` is now its exception.
 - `UpdateController.CanDownload`, `CanInstall` and `IsBusy`.
 - `ReleaseUpdater.VerifyDownloadAsync` (asks the verifier about a downloaded installer without starting it; `UpdateController` does so right after every download, also when it only downloads) and

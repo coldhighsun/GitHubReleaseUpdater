@@ -72,6 +72,34 @@ public sealed class UpdateControllerOptions
     public TimeSpan BeforeInstallTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// When true, a failure of <see cref="BeforeInstallAsync"/> or exceeding <see cref="BeforeInstallTimeout"/> stops the
+    /// installation: the installer is not started and the failure is reported like any other failed installation
+    /// (<see cref="UpdateController.LastFailure"/>, <see cref="IUpdatePresenter.ReportInstallFailed"/>), for a preparation
+    /// without which the installer must not run. The token given to <see cref="BeforeInstallAsync"/> is then cancelled, so
+    /// that it does not go on beside <see cref="InstallNotStartedAsync"/>, which undoes what it did. When
+    /// false (the default), the failure is reported to <see cref="OnError"/> and the installer is started anyway.
+    /// </summary>
+    public bool BeforeInstallMustSucceed { get; init; }
+
+    /// <summary>
+    /// Runs when <see cref="BeforeInstallAsync"/> was started but the installer then did not start (the user declined its
+    /// elevation prompt, it could not be launched or was refused by the verifier, the installation was cancelled, or
+    /// <see cref="BeforeInstallMustSucceed"/> stopped it), so the application can undo what the preparation changed.
+    /// It is not run when the installer started, even if it ended again with <see cref="WatchInstaller"/>. It runs
+    /// before the failure or cancellation is presented, and its token is cancelled after
+    /// <see cref="InstallNotStartedTimeout"/> (a callback that ignores the token goes on in the background). It also runs
+    /// when the installation was cancelled, and the cancellation is passed on only after it has ended or the time is up,
+    /// so a cancelled installation can take that long to return. A failure goes to <see cref="OnError"/>. Null does
+    /// nothing.
+    /// </summary>
+    public Func<CancellationToken, Task>? InstallNotStartedAsync { get; init; }
+
+    /// <summary>
+    /// How long <see cref="InstallNotStartedAsync"/> is given. The default is ten seconds.
+    /// </summary>
+    public TimeSpan InstallNotStartedTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// When true, <see cref="UpdateController.InstallAsync"/> stays in <see cref="UpdateState.Installing"/> until the
     /// installer process has ended and <see cref="InstallerGracePeriod"/> has passed. If the application is still running
     /// by then, the installer did not replace it (the user cancelled, or it failed), the state goes back to
