@@ -6,6 +6,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     labels: ["dependencies"]
+    ignore:
+      - dependency-name: "Microsoft.SourceLink.GitHub"
+        update-types: ["version-update:semver-major"]
     groups:
       nuget-minor-patch:
         update-types: ["minor", "patch"]
